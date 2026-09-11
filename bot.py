@@ -189,13 +189,13 @@ async def tambah(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ==========================================
 
     pesan = (
-        f"âœ… TRANSAKSI TERCATAT\n\n"
-        f"ðŸ†” ID: {transaction_id}\n"
-        f"ðŸ“… Tanggal: {tanggal.strftime('%d/%m/%Y %H:%M')}\n"
-        f"ðŸ“Œ Jenis: {jenis}\n"
-        f"ðŸ·ï¸ Kategori: {kategori}\n"
-        f"ðŸ’° Nominal: {nominal_rupiah}\n"
-        f"ðŸ“ Keterangan: {keterangan or '-'}"
+        f"✅ TRANSAKSI TERCATAT\n\n"
+        f"🆔 ID: {transaction_id}\n"
+        f"📅 Tanggal: {tanggal.strftime('%d/%m/%Y %H:%M')}\n"
+        f"📌 Jenis: {jenis}\n"
+        f"🏷️ Kategori: {kategori}\n"
+        f"💰 Nominal: {nominal_rupiah}\n"
+        f"📝 Keterangan: {keterangan or '-'}"
     )
 
     if peringatan_budget:
