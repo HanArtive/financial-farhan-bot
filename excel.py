@@ -1,5 +1,6 @@
 import os
-from datetime import datetime, timezone
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 from supabase import create_client
@@ -57,7 +58,10 @@ def add_transaction(
 
     transaction_id = transaction["id"]
 
-    # Ambil tanggal dari database jika tersedia
+    # =========================
+    # AMBIL WAKTU TRANSAKSI
+    # =========================
+
     tanggal_raw = transaction.get("tanggal")
 
     if tanggal_raw:
@@ -68,9 +72,20 @@ def add_transaction(
                     "+00:00"
                 )
             )
+
+            # Konversi UTC → WIB
+            tanggal = tanggal.astimezone(
+                ZoneInfo("Asia/Jakarta")
+            )
+
         except (ValueError, TypeError):
-            tanggal = datetime.now(timezone.utc)
+            tanggal = datetime.now(
+                ZoneInfo("Asia/Jakarta")
+            )
+
     else:
-        tanggal = datetime.now(timezone.utc)
+        tanggal = datetime.now(
+            ZoneInfo("Asia/Jakarta")
+        )
 
     return transaction_id, tanggal
