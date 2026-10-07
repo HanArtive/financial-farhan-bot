@@ -1,4 +1,6 @@
 import os
+from datetime import datetime, timezone, timedelta
+
 from dotenv import load_dotenv
 from supabase import create_client
 from openpyxl import load_workbook
@@ -26,6 +28,29 @@ FILE_EXCEL = r"C:\Users\FARHAN\OneDrive\Financial_Plan_Farhan_DENSO_6_Bulan.xlsx
 SHEET_NAME = "Transaksi"
 TABLE_NAME = "TransaksiTable"
 
+WIB = timezone(timedelta(hours=7))
+def convert_to_wib(tanggal_raw):
+    if not tanggal_raw:
+        return None
+
+    try:
+        if isinstance(tanggal_raw, datetime):
+            tanggal = tanggal_raw
+        else:
+            tanggal = datetime.fromisoformat(
+                str(tanggal_raw).replace("Z", "+00:00")
+            )
+
+        # Kalau timestamp dari Supabase punya timezone,
+        # konversi ke WIB
+        if tanggal.tzinfo is not None:
+            tanggal = tanggal.astimezone(WIB)
+
+        # Excel tidak perlu menyimpan timezone
+        return tanggal.replace(tzinfo=None)
+
+    except (ValueError, TypeError):
+        return tanggal_raw
 
 def sync_excel():
 
@@ -105,7 +130,9 @@ def sync_excel():
 
             row = excel_rows[transaction_id]
 
-            sheet.cell(row, 2).value = transaction.get("tanggal")
+            sheet.cell(row, 2).value = convert_to_wib(
+                transaction.get("tanggal")
+            )
             sheet.cell(row, 3).value = transaction.get("jenis")
             sheet.cell(row, 4).value = transaction.get("kategori")
             sheet.cell(row, 5).value = transaction.get("nominal")
@@ -124,7 +151,9 @@ def sync_excel():
             row = sheet.max_row + 1
 
             sheet.cell(row, 1).value = transaction["id"]
-            sheet.cell(row, 2).value = transaction.get("tanggal")
+            sheet.cell(row, 2).value = convert_to_wib(
+                transaction.get("tanggal")
+            )
             sheet.cell(row, 3).value = transaction.get("jenis")
             sheet.cell(row, 4).value = transaction.get("kategori")
             sheet.cell(row, 5).value = transaction.get("nominal")

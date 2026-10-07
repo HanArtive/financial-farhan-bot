@@ -1,5 +1,5 @@
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import MessageHandler, filters
@@ -23,9 +23,46 @@ supabase = create_client(
     SUPABASE_URL,
     SUPABASE_KEY
 )
-# Menyimpan transaksi yang sedang menunggu konfirmasi hapus
+
+# Menyimpan transaksi yang sedang menunggu konfirmasi hapus/edit
 pending_delete = {}
 pending_edit = {}
+
+# ==========================================
+# HELPER: Dapatkan Rentang Periode Tanggal 11
+# ==========================================
+
+def get_periode_berjalan(dt=None):
+    """
+    Menghitung awal periode (tgl 11) dan akhir periode (tgl 10 bulan depan)
+    berdasarkan tanggal yang diberikan (default: hari ini).
+    """
+    if dt is None:
+        dt = datetime.now(timezone.utc)
+
+    # Jika hari ini tgl 11 atau lebih, periode mulai tgl 11 bulan ini
+    if dt.day >= 11:
+        awal_periode = dt.replace(day=11, hour=0, minute=0, second=0, microsecond=0)
+    else:
+        # Jika sebelum tgl 11, periode mulai tgl 11 bulan sebelumnya
+        # Mengurangi bulan dengan aman
+        bulan_lalu = dt.month - 1 if dt.month > 1 else 12
+        tahun_lalu = dt.year if dt.month > 1 else dt.year - 1
+        awal_periode = dt.replace(year=tahun_lalu, month=bulan_lalu, day=11, hour=0, minute=0, second=0, microsecond=0)
+
+    # Akhir periode adalah H-1 dari tgl 11 bulan berikutnya (tgl 10)
+    if awal_periode.month == 12:
+        bulan_depan = 1
+        tahun_depan = awal_periode.year + 1
+    else:
+        bulan_depan = awal_periode.month + 1
+        tahun_depan = awal_periode.year
+
+    akhir_periode = awal_periode.replace(year=tahun_depan, month=bulan_depan, day=11) - timedelta(seconds=1)
+
+    return awal_periode, akhir_periode
+
+
 # ==========================================
 # START
 # ==========================================
@@ -34,7 +71,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         "Halo Farhan 👋\n\n"
-        "💰 Finance Bot aktif!\n\n"
+        "💰 Finance Bot aktif!\n"
+        "📅 Periode Keuangan: Tanggal 11 s/d Tanggal 10 bulan berikutnya.\n\n"
 
         "📝 TAMBAH TRANSAKSI\n"
         "/tambah Pengeluaran Makan 30000 makan siang\n"
@@ -53,33 +91,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def tambah(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    # Cek jumlah argument
     if len(context.args) < 3:
-
         await update.message.reply_text(
             "❌ Format salah.\n\n"
-
             "Gunakan:\n"
             "/tambah [Jenis] [Kategori] [Nominal] [Keterangan]\n\n"
-
             "Contoh:\n"
             "/tambah Pengeluaran Makan 30000 makan siang\n"
             "/tambah Pengeluaran Bensin 50000 isi bensin\n"
             "/tambah Pemasukan Gaji 5000000 gaji DENSO"
         )
-
         return
-
-    # ==========================================
-    # AMBIL DATA
-    # ==========================================
 
     jenis = context.args[0]
     kategori = context.args[1]
-
-    # ==========================================
-    # VALIDASI JENIS
-    # ==========================================
 
     jenis_map = {
         "pengeluaran": "Pengeluaran",
@@ -89,104 +114,57 @@ async def tambah(update: Update, context: ContextTypes.DEFAULT_TYPE):
     jenis_lower = jenis.lower()
 
     if jenis_lower not in jenis_map:
-
         await update.message.reply_text(
             "❌ Jenis transaksi tidak valid.\n\n"
             "Gunakan salah satu:\n"
             "• Pengeluaran\n"
             "• Pemasukan"
         )
-
         return
 
     jenis = jenis_map[jenis_lower]
 
-    # ==========================================
-    # NOMINAL
-    # ==========================================
-
     try:
-
         nominal = int(context.args[2])
-
     except ValueError:
-
         await update.message.reply_text(
             "❌ Nominal harus berupa angka.\n\n"
             "Contoh:\n"
             "/tambah Pengeluaran Makan 30000 makan siang"
         )
-
         return
-
-    # ==========================================
-    # VALIDASI NOMINAL
-    # ==========================================
 
     if nominal <= 0:
-
-        await update.message.reply_text(
-            "❌ Nominal harus lebih dari 0."
-        )
-
+        await update.message.reply_text("❌ Nominal harus lebih dari 0.")
         return
-
-    # ==========================================
-    # KETERANGAN
-    # ==========================================
 
     keterangan = " ".join(context.args[3:])
 
-    # ==========================================
-    # SIMPAN
-    # ==========================================
-
     try:
-
         transaction_id, tanggal = add_transaction(
             jenis=jenis,
             kategori=kategori,
             nominal=nominal,
             keterangan=keterangan
         )
-
     except Exception as e:
-
         print("ERROR:", e)
-
         await update.message.reply_text(
             "❌ Transaksi gagal disimpan.\n\n"
             "Cek terminal/PowerShell untuk melihat error."
         )
-
         return
-
-    # ==========================================
-    # FORMAT RUPIAH
-    # ==========================================
 
     nominal_rupiah = f"Rp{nominal:,}".replace(",", ".")
 
-    # ==========================================
-    # CEK PERINGATAN BUDGET
-    # ==========================================
-
     peringatan_budget = None
-
     try:
         peringatan_budget = await cek_budget_setelah_transaksi(
             kategori=kategori,
             jenis=jenis
         )
-
-        print("DEBUG BUDGET:", peringatan_budget)
-
     except Exception as e:
         print("ERROR CEK BUDGET:", e)
-    
-    # ==========================================
-    # RESPONSE
-    # ==========================================
 
     pesan = (
         f"✅ TRANSAKSI TERCATAT\n\n"
@@ -209,27 +187,14 @@ async def tambah(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ==========================================
 
 async def makan(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
     if not context.args:
-
-        await update.message.reply_text(
-            "Format yang benar:\n"
-            "/makan 25000 makan siang"
-        )
-
+        await update.message.reply_text("Format yang benar:\n/makan 25000 makan siang")
         return
 
     try:
-
         nominal = int(context.args[0])
-
     except ValueError:
-
-        await update.message.reply_text(
-            "Nominal harus berupa angka.\n"
-            "Contoh: /makan 25000"
-        )
-
+        await update.message.reply_text("Nominal harus berupa angka.\nContoh: /makan 25000")
         return
 
     keterangan = " ".join(context.args[1:])
@@ -243,70 +208,44 @@ async def makan(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     nominal_rupiah = f"Rp{nominal:,}".replace(",", ".")
 
-    # ==========================================
-    # CEK PERINGATAN BUDGET
-    # ==========================================
-
     peringatan_budget = None
-
     try:
         peringatan_budget = await cek_budget_setelah_transaksi(
-            kategori=kategori,
-            jenis=jenis
+            kategori="Makan",
+            jenis="Pengeluaran"
         )
-
-        print("DEBUG BUDGET:", peringatan_budget)
-
     except Exception as e:
         print("ERROR CEK BUDGET:", e)
+
     pesan = (
         f"✅ TRANSAKSI TERCATAT\n\n"
-
         f"🆔 ID: {transaction_id}\n"
         f"📅 Tanggal: {tanggal.strftime('%d/%m/%Y %H:%M')}\n"
-        f"📌 Jenis: {jenis}\n"
-        f"🏷️ Kategori: {kategori}\n"
+        f"📌 Jenis: Pengeluaran\n"
+        f"🏷️ Kategori: Makan\n"
         f"💰 Nominal: {nominal_rupiah}\n"
         f"📝 Keterangan: {keterangan or '-'}"
     )
-
-    # Cek kondisi budget
-    peringatan_budget = await cek_budget_setelah_transaksi(
-        kategori=kategori,
-        jenis=jenis
-    )
-    print("DEBUG BUDGET:", peringatan_budget)
 
     if peringatan_budget:
         pesan += peringatan_budget
 
     await update.message.reply_text(pesan)
+
+
 # ==========================================
 # COMMAND LAMA: BENSIN
 # ==========================================
 
 async def bensin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
     if not context.args:
-
-        await update.message.reply_text(
-            "Format yang benar:\n"
-            "/bensin 50000 isi bensin"
-        )
-
+        await update.message.reply_text("Format yang benar:\n/bensin 50000 isi bensin")
         return
 
     try:
-
         nominal = int(context.args[0])
-
     except ValueError:
-
-        await update.message.reply_text(
-            "Nominal harus berupa angka.\n"
-            "Contoh: /bensin 50000"
-        )
-
+        await update.message.reply_text("Nominal harus berupa angka.\nContoh: /bensin 50000")
         return
 
     keterangan = " ".join(context.args[1:])
@@ -319,27 +258,20 @@ async def bensin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     nominal_rupiah = f"Rp{nominal:,}".replace(",", ".")
-    
-    # ==========================================
-    # CEK BUDGET
-    # ==========================================
 
     peringatan_budget = await cek_budget_setelah_transaksi(
-        kategori=kategori,
-        jenis=jenis
+        kategori="Bensin",
+        jenis="Pengeluaran"
     )
 
-    print("DEBUG BUDGET:", peringatan_budget)
-
     pesan = (
-        f"âœ… TRANSAKSI TERCATAT\n\n"
-
-        f"ðŸ†” ID: {transaction_id}\n"
-        f"ðŸ“… Tanggal: {tanggal.strftime('%d/%m/%Y %H:%M')}\n"
-        f"ðŸ“Œ Jenis: {jenis}\n"
-        f"ðŸ·ï¸ Kategori: {kategori}\n"
-        f"ðŸ’° Nominal: {nominal_rupiah}\n"
-        f"ðŸ“ Keterangan: {keterangan or '-'}"
+        f"✅ TRANSAKSI TERCATAT\n\n"
+        f"🆔 ID: {transaction_id}\n"
+        f"📅 Tanggal: {tanggal.strftime('%d/%m/%Y %H:%M')}\n"
+        f"📌 Jenis: Pengeluaran\n"
+        f"🏷️ Kategori: Bensin\n"
+        f"💰 Nominal: {nominal_rupiah}\n"
+        f"📝 Keterangan: {keterangan or '-'}"
     )
 
     if peringatan_budget:
@@ -347,41 +279,26 @@ async def bensin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(pesan)
 
+
 # ==========================================
 # RIWAYAT TRANSAKSI
 # ==========================================
 
 async def riwayat(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
     try:
-
-        # Ambil jumlah transaksi
         limit = 10
-
         if context.args:
-
             try:
                 limit = int(context.args[0])
-
             except ValueError:
-
                 await update.message.reply_text(
                     "❌ Jumlah transaksi harus berupa angka.\n\n"
-                    "Contoh:\n"
-                    "/riwayat\n"
-                    "/riwayat 20"
+                    "Contoh:\n/riwayat\n/riwayat 20"
                 )
-
                 return
 
-        # Batasi agar tidak terlalu banyak
-        if limit < 1:
-            limit = 1
+        limit = max(1, min(limit, 50))
 
-        if limit > 50:
-            limit = 50
-
-        # Ambil data dari Supabase
         response = (
             supabase
             .table("transaksi")
@@ -394,17 +311,12 @@ async def riwayat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         data = response.data
 
         if not data:
-
-            await update.message.reply_text(
-                "📋 Belum ada transaksi."
-            )
-
+            await update.message.reply_text("📋 Belum ada transaksi.")
             return
 
         pesan = "📋 RIWAYAT TRANSAKSI\n\n"
 
         for transaksi in data:
-
             transaction_id = transaksi.get("id", "-")
             jenis = transaksi.get("jenis", "-")
             kategori = transaksi.get("kategori", "-")
@@ -412,25 +324,12 @@ async def riwayat(update: Update, context: ContextTypes.DEFAULT_TYPE):
             keterangan = transaksi.get("keterangan", "-")
             tanggal = transaksi.get("tanggal", "-")
 
-            # Format nominal
             try:
-                nominal_rupiah = (
-                    f"Rp{int(nominal):,}"
-                    .replace(",", ".")
-                )
-
+                nominal_rupiah = f"Rp{int(nominal):,}".replace(",", ".")
             except (ValueError, TypeError):
-
                 nominal_rupiah = f"Rp{nominal}"
 
-            # Simbol pemasukan/pengeluaran
-            if jenis.lower() == "pemasukan":
-
-                simbol = "📥"
-
-            else:
-
-                simbol = "💸"
+            simbol = "📥" if jenis.lower() == "pemasukan" else "💸"
 
             pesan += (
                 f"🆔 #{transaction_id}\n"
@@ -445,295 +344,127 @@ async def riwayat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(pesan)
 
     except Exception as e:
-
         print("ERROR RIWAYAT:", e)
+        await update.message.reply_text("❌ Gagal mengambil riwayat transaksi.")
 
-        await update.message.reply_text(
-            "❌ Gagal mengambil riwayat transaksi.\n\n"
-            "Cek PowerShell untuk melihat error."
-        )
+
 # ==========================================
 # HAPUS TRANSAKSI
 # ==========================================
 
 async def hapus(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
     if not context.args:
-
-        await update.message.reply_text(
-            "❌ Masukkan ID transaksi yang ingin dihapus.\n\n"
-            "Contoh:\n"
-            "/hapus 17"
-        )
-
+        await update.message.reply_text("❌ Masukkan ID transaksi.\n\nContoh:\n/hapus 17")
         return
 
     try:
-
         transaction_id = int(context.args[0])
-
     except ValueError:
-
-        await update.message.reply_text(
-            "❌ ID transaksi harus berupa angka.\n\n"
-            "Contoh:\n"
-            "/hapus 17"
-        )
-
+        await update.message.reply_text("❌ ID transaksi harus berupa angka.")
         return
 
     try:
-
-        # Cari transaksi
-        response = (
-            supabase
-            .table("transaksi")
-            .select("*")
-            .eq("id", transaction_id)
-            .execute()
-        )
-
+        response = supabase.table("transaksi").select("*").eq("id", transaction_id).execute()
         data = response.data
 
         if not data:
-
-            await update.message.reply_text(
-                f"❌ Transaksi dengan ID #{transaction_id} tidak ditemukan."
-            )
-
+            await update.message.reply_text(f"❌ Transaksi ID #{transaction_id} tidak ditemukan.")
             return
 
         transaksi = data[0]
-
         jenis = transaksi.get("jenis", "-")
         kategori = transaksi.get("kategori", "-")
         nominal = transaksi.get("nominal", 0)
         keterangan = transaksi.get("keterangan", "-")
         tanggal = transaksi.get("tanggal", "-")
 
-        nominal_rupiah = (
-            f"Rp{int(nominal):,}"
-            .replace(",", ".")
-        )
-
-        # Simpan ID yang menunggu konfirmasi
+        nominal_rupiah = f"Rp{int(nominal):,}".replace(",", ".")
         user_id = update.effective_user.id
-
         pending_delete[user_id] = transaction_id
 
         await update.message.reply_text(
-
-            f"⚠️ KONFIRMASI HAPUS TRANSAKSI\n\n"
-
+            f"⚠️️ KONFIRMASI HAPUS TRANSAKSI\n\n"
             f"🆔 ID: #{transaction_id}\n"
             f"📅 Tanggal: {tanggal}\n"
             f"📌 Jenis: {jenis}\n"
             f"🏷️ Kategori: {kategori}\n"
             f"💰 Nominal: {nominal_rupiah}\n"
             f"📝 Keterangan: {keterangan}\n\n"
-
-            f"Yakin ingin menghapus transaksi ini?\n\n"
-
-            f"Ketik:\n"
-            f"YA → hapus transaksi\n"
-            f"BATAL → batalkan"
+            f"Ketik YA untuk menghapus atau BATAL untuk membatalkan."
         )
-
     except Exception as e:
-
         print("ERROR HAPUS:", e)
+        await update.message.reply_text("❌ Gagal mencari transaksi.")
 
-        await update.message.reply_text(
-            "❌ Gagal mencari transaksi.\n\n"
-            "Cek PowerShell untuk melihat error."
-        )
-# ==========================================
-# KONFIRMASI HAPUS
-# ==========================================
 
-async def konfirmasi_hapus(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
+async def konfirmasi_hapus(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-
     if user_id not in pending_delete:
-
         return
 
     jawaban = update.message.text.strip().lower()
 
-    # ==========================================
-    # BATAL
-    # ==========================================
-
     if jawaban == "batal":
-
         del pending_delete[user_id]
-
-        await update.message.reply_text(
-            "❌ Penghapusan dibatalkan.\n\n"
-            "Transaksi tetap aman."
-        )
-
+        await update.message.reply_text("❌ Penghapusan dibatalkan.")
         return
 
-    # ==========================================
-    # BUKAN YA
-    # ==========================================
-
     if jawaban != "ya":
-
-        await update.message.reply_text(
-            "⚠️ Ketik YA untuk menghapus atau BATAL untuk membatalkan."
-        )
-
+        await update.message.reply_text("⚠️ Ketik YA untuk menghapus atau BATAL.")
         return
 
     transaction_id = pending_delete[user_id]
-
     try:
-
-        # Hapus dari Supabase
-        (
-            supabase
-            .table("transaksi")
-            .delete()
-            .eq("id", transaction_id)
-            .execute()
-        )
-
-        # Hapus status pending
+        supabase.table("transaksi").delete().eq("id", transaction_id).execute()
         del pending_delete[user_id]
-
-        await update.message.reply_text(
-            f"✅ TRANSAKSI BERHASIL DIHAPUS\n\n"
-            f"🆔 ID: #{transaction_id}\n\n"
-            f"Transaksi sudah dihapus dari database.\n"
-            f"Excel akan mengikuti saat sync dijalankan."
-        )
-
+        await update.message.reply_text(f"✅ TRANSAKSI #{transaction_id} BERHASIL DIHAPUS")
     except Exception as e:
-
         print("ERROR KONFIRMASI HAPUS:", e)
+        await update.message.reply_text("❌ Gagal menghapus transaksi.")
 
-        await update.message.reply_text(
-            "❌ Gagal menghapus transaksi.\n\n"
-            "Cek PowerShell untuk melihat error."
-        )
+
 # ==========================================
 # EDIT TRANSAKSI
 # ==========================================
 
 async def edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
     if len(context.args) < 3:
-
         await update.message.reply_text(
-            "❌ Format salah.\n\n"
-            "Gunakan:\n"
-            "/edit [ID] [Kategori] [Nominal] [Keterangan]\n\n"
-            "Contoh:\n"
-            "/edit 25 Makan 35000 makan malam"
+            "❌ Format salah.\n\nContoh:\n/edit 25 Makan 35000 makan malam"
         )
-
         return
 
-    # ==========================================
-    # ID TRANSAKSI
-    # ==========================================
-
     try:
-
         transaction_id = int(context.args[0])
-
     except ValueError:
-
-        await update.message.reply_text(
-            "❌ ID transaksi harus berupa angka.\n\n"
-            "Contoh:\n"
-            "/edit 25 Makan 35000 makan malam"
-        )
-
+        await update.message.reply_text("❌ ID harus angka.")
         return
 
     kategori_baru = context.args[1]
 
-    # ==========================================
-    # NOMINAL BARU
-    # ==========================================
-
     try:
-
         nominal_baru = int(context.args[2])
-
     except ValueError:
-
-        await update.message.reply_text(
-            "❌ Nominal harus berupa angka.\n\n"
-            "Contoh:\n"
-            "/edit 25 Makan 35000 makan malam"
-        )
-
+        await update.message.reply_text("❌ Nominal harus angka.")
         return
 
     if nominal_baru <= 0:
-
-        await update.message.reply_text(
-            "❌ Nominal harus lebih dari 0."
-        )
-
+        await update.message.reply_text("❌ Nominal harus > 0.")
         return
-
-    # ==========================================
-    # KETERANGAN BARU
-    # ==========================================
 
     keterangan_baru = " ".join(context.args[3:])
 
     try:
-
-        # Cari transaksi lama
-        response = (
-            supabase
-            .table("transaksi")
-            .select("*")
-            .eq("id", transaction_id)
-            .execute()
-        )
-
+        response = supabase.table("transaksi").select("*").eq("id", transaction_id).execute()
         data = response.data
 
         if not data:
-
-            await update.message.reply_text(
-                f"❌ Transaksi dengan ID #{transaction_id} tidak ditemukan."
-            )
-
+            await update.message.reply_text(f"❌ Transaksi #{transaction_id} tidak ditemukan.")
             return
 
         transaksi = data[0]
-
-        jenis_lama = transaksi.get("jenis", "-")
-        kategori_lama = transaksi.get("kategori", "-")
-        nominal_lama = transaksi.get("nominal", 0)
-        keterangan_lama = transaksi.get("keterangan", "-")
-        tanggal = transaksi.get("tanggal", "-")
-
-        nominal_lama_rupiah = (
-            f"Rp{int(nominal_lama):,}"
-            .replace(",", ".")
-        )
-
-        nominal_baru_rupiah = (
-            f"Rp{nominal_baru:,}"
-            .replace(",", ".")
-        )
-
         user_id = update.effective_user.id
 
-        # Simpan perubahan sementara
         pending_edit[user_id] = {
             "id": transaction_id,
             "kategori": kategori_baru,
@@ -742,760 +473,343 @@ async def edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
         }
 
         await update.message.reply_text(
-
-            f"✏️ KONFIRMASI EDIT TRANSAKSI\n\n"
-
-            f"🆔 ID: #{transaction_id}\n"
-            f"📅 Tanggal: {tanggal}\n"
-            f"📌 Jenis: {jenis_lama}\n\n"
-
-            f"DATA LAMA\n"
-            f"🏷️ Kategori: {kategori_lama}\n"
-            f"💰 Nominal: {nominal_lama_rupiah}\n"
-            f"📝 Keterangan: {keterangan_lama}\n\n"
-
-            f"DATA BARU\n"
-            f"🏷️ Kategori: {kategori_baru}\n"
-            f"💰 Nominal: {nominal_baru_rupiah}\n"
-            f"📝 Keterangan: {keterangan_baru or '-'}\n\n"
-
-            f"Yakin ingin menyimpan perubahan?\n\n"
-            f"Ketik:\n"
-            f"YA → simpan perubahan\n"
-            f"BATAL → batalkan"
+            f"✏️ KONFIRMASI EDIT TRANSAKSI #{transaction_id}\n\n"
+            f"Kategori Baru: {kategori_baru}\n"
+            f"Nominal Baru: Rp{nominal_baru:,}".replace(",", ".") + f"\n"
+            f"Keterangan Baru: {keterangan_baru or '-'}\n\n"
+            f"Ketik YA untuk simpan atau BATAL."
         )
 
     except Exception as e:
-
         print("ERROR EDIT:", e)
+        await update.message.reply_text("❌ Gagal mengedit transaksi.")
 
-        await update.message.reply_text(
-            "❌ Gagal mengambil transaksi.\n\n"
-            "Cek PowerShell untuk melihat error."
-        )
-# ==========================================
-# KONFIRMASI EDIT
-# ==========================================
 
-async def konfirmasi_edit(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
+async def konfirmasi_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-
     if user_id not in pending_edit:
-
         return
 
     jawaban = update.message.text.strip().lower()
 
-    # ==========================================
-    # BATAL
-    # ==========================================
-
     if jawaban == "batal":
-
         del pending_edit[user_id]
-
-        await update.message.reply_text(
-            "❌ Perubahan dibatalkan.\n\n"
-            "Data transaksi tetap seperti semula."
-        )
-
+        await update.message.reply_text("❌ Perubahan dibatalkan.")
         return
 
-    # ==========================================
-    # BUKAN YA
-    # ==========================================
-
     if jawaban != "ya":
-
-        await update.message.reply_text(
-            "⚠️ Ketik YA untuk menyimpan perubahan "
-            "atau BATAL untuk membatalkan."
-        )
-
+        await update.message.reply_text("⚠️ Ketik YA untuk menyimpan atau BATAL.")
         return
 
     perubahan = pending_edit[user_id]
-
     transaction_id = perubahan["id"]
 
     try:
-
-        # UPDATE SUPABASE
-        (
-            supabase
-            .table("transaksi")
-            .update({
-                "kategori": perubahan["kategori"],
-                "nominal": perubahan["nominal"],
-                "keterangan": perubahan["keterangan"]
-            })
-            .eq("id", transaction_id)
-            .execute()
-        )
+        supabase.table("transaksi").update({
+            "kategori": perubahan["kategori"],
+            "nominal": perubahan["nominal"],
+            "keterangan": perubahan["keterangan"]
+        }).eq("id", transaction_id).execute()
 
         del pending_edit[user_id]
-
-        nominal_rupiah = (
-            f"Rp{int(perubahan['nominal']):,}"
-            .replace(",", ".")
-        )
-
-        await update.message.reply_text(
-
-            f"✅ TRANSAKSI BERHASIL DIUPDATE\n\n"
-
-            f"🆔 ID: #{transaction_id}\n"
-            f"🏷️ Kategori: {perubahan['kategori']}\n"
-            f"💰 Nominal: {nominal_rupiah}\n"
-            f"📝 Keterangan: "
-            f"{perubahan['keterangan'] or '-'}\n\n"
-
-            f"Database Supabase sudah diperbarui.\n"
-            f"Excel akan mengikuti saat sync dijalankan."
-        )
-
+        await update.message.reply_text(f"✅ TRANSAKSI #{transaction_id} BERHASIL DIUPDATE")
     except Exception as e:
-
         print("ERROR KONFIRMASI EDIT:", e)
+        await update.message.reply_text("❌ Gagal mengupdate transaksi.")
 
-        await update.message.reply_text(
-            "❌ Gagal mengupdate transaksi.\n\n"
-            "Cek PowerShell untuk melihat error."
-        )
 
-# ==========================================
-# KONFIRMASI SEMUA
-# ==========================================
-
-async def konfirmasi_semua(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
+async def konfirmasi_semua(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-
-    # Kalau sedang proses hapus
     if user_id in pending_delete:
-
         await konfirmasi_hapus(update, context)
         return
-
-    # Kalau sedang proses edit
     if user_id in pending_edit:
-
         await konfirmasi_edit(update, context)
         return
+
+
 # ==========================================
 # CEK SALDO
 # ==========================================
 
 async def saldo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
     try:
-
-        # Ambil seluruh transaksi
-        response = (
-            supabase
-            .table("transaksi")
-            .select("jenis, nominal")
-            .execute()
-        )
-
+        response = supabase.table("transaksi").select("jenis, nominal").execute()
         data = response.data
 
         total_pemasukan = 0
         total_pengeluaran = 0
 
         for transaksi in data:
-
             jenis = transaksi.get("jenis", "")
-            nominal = transaksi.get("nominal", 0)
-
             try:
-                nominal = int(nominal)
+                nominal = int(transaksi.get("nominal", 0))
             except (ValueError, TypeError):
                 nominal = 0
 
             if jenis.lower() == "pemasukan":
-
                 total_pemasukan += nominal
-
             elif jenis.lower() == "pengeluaran":
-
                 total_pengeluaran += nominal
 
         saldo_sekarang = total_pemasukan - total_pengeluaran
 
-        # Format Rupiah
-        pemasukan_rupiah = (
-            f"Rp{total_pemasukan:,}"
-            .replace(",", ".")
-        )
-
-        pengeluaran_rupiah = (
-            f"Rp{total_pengeluaran:,}"
-            .replace(",", ".")
-        )
-
-        saldo_rupiah = (
-            f"Rp{saldo_sekarang:,}"
-            .replace(",", ".")
-        )
-
-        # Tentukan status saldo
-        if saldo_sekarang > 0:
-
-            status = "🟢 Saldo masih positif"
-
-        elif saldo_sekarang < 0:
-
-            status = "🔴 Pengeluaran lebih besar dari pemasukan"
-
-        else:
-
-            status = "🟡 Saldo saat ini Rp0"
+        status = "🟢 Saldo masih positif" if saldo_sekarang > 0 else ("🔴 Pengeluaran lebih besar" if saldo_sekarang < 0 else "🟡 Saldo Rp0")
 
         await update.message.reply_text(
-
-            f"💰 SALDO KEUANGAN\n\n"
-
-            f"📥 Total Pemasukan\n"
-            f"{pemasukan_rupiah}\n\n"
-
-            f"📤 Total Pengeluaran\n"
-            f"{pengeluaran_rupiah}\n\n"
-
+            f"💰 SALDO KEUANGAN TOTAL\n\n"
+            f"📥 Pemasukan: Rp{total_pemasukan:,}".replace(",", ".") + "\n"
+            f"📤 Pengeluaran: Rp{total_pengeluaran:,}".replace(",", ".") + "\n"
             f"━━━━━━━━━━━━━━━━\n"
-
-            f"💵 SALDO\n"
-            f"{saldo_rupiah}\n\n"
-
-            f"{status}"
-
+            f"💵 SALDO: Rp{saldo_sekarang:,}".replace(",", ".") + f"\n\n{status}"
         )
-
     except Exception as e:
-
         print("ERROR SALDO:", e)
+        await update.message.reply_text("❌ Gagal menghitung saldo.")
 
-        await update.message.reply_text(
-            "❌ Gagal menghitung saldo.\n\n"
-            "Cek PowerShell untuk melihat error."
-        )
+
 # ==========================================
-# REKAP KEUANGAN
+# REKAP KEUANGAN (Siklus Tgl 11)
 # ==========================================
 
 async def rekap(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
     try:
+        awal_periode, akhir_periode = get_periode_berjalan()
 
-        # Bulan berjalan
-        sekarang = datetime.now()
-
-        bulan = sekarang.month
-        tahun = sekarang.year
-
-        nama_bulan = [
-            "Januari",
-            "Februari",
-            "Maret",
-            "April",
-            "Mei",
-            "Juni",
-            "Juli",
-            "Agustus",
-            "September",
-            "Oktober",
-            "November",
-            "Desember"
-        ]
-
-        nama_bulan_sekarang = nama_bulan[bulan - 1]
-
-        # Ambil transaksi
-        response = (
-            supabase
-            .table("transaksi")
-            .select("*")
-            .execute()
-        )
-
+        response = supabase.table("transaksi").select("*").execute()
         data = response.data
-
-        # ==========================================
-        # VARIABEL PERHITUNGAN
-        # ==========================================
 
         total_pemasukan = 0
         total_pengeluaran = 0
-
         kategori_pengeluaran = {}
         kategori_pemasukan = {}
 
-        # ==========================================
-        # PROSES TRANSAKSI
-        # ==========================================
-
         for transaksi in data:
-
             tanggal = transaksi.get("tanggal")
-
             if not tanggal:
                 continue
 
             try:
-
-                tanggal_dt = datetime.fromisoformat(
-                    tanggal.replace("Z", "+00:00")
-                )
-
+                tanggal_dt = datetime.fromisoformat(tanggal.replace("Z", "+00:00"))
             except (ValueError, TypeError):
-
                 continue
 
-            # Hanya bulan dan tahun sekarang
-            if (
-                tanggal_dt.month != bulan
-                or tanggal_dt.year != tahun
-            ):
+            # Filter berdasarkan siklus tgl 11 s/d tgl 10
+            if not (awal_periode <= tanggal_dt <= akhir_periode):
                 continue
 
             jenis = transaksi.get("jenis", "")
             kategori = transaksi.get("kategori", "Lainnya")
-            nominal = transaksi.get("nominal", 0)
-
             try:
-
-                nominal = int(nominal)
-
+                nominal = int(transaksi.get("nominal", 0))
             except (ValueError, TypeError):
-
                 nominal = 0
 
-            # ==========================================
-            # PEMASUKAN
-            # ==========================================
-
             if jenis.lower() == "pemasukan":
-
                 total_pemasukan += nominal
-
-                kategori_pemasukan[kategori] = (
-                    kategori_pemasukan.get(kategori, 0)
-                    + nominal
-                )
-
-            # ==========================================
-            # PENGELUARAN
-            # ==========================================
-
+                kategori_pemasukan[kategori] = kategori_pemasukan.get(kategori, 0) + nominal
             elif jenis.lower() == "pengeluaran":
-
                 total_pengeluaran += nominal
-
-                kategori_pengeluaran[kategori] = (
-                    kategori_pengeluaran.get(kategori, 0)
-                    + nominal
-                )
-
-        # ==========================================
-        # FORMAT RUPIAH
-        # ==========================================
+                kategori_pengeluaran[kategori] = kategori_pengeluaran.get(kategori, 0) + nominal
 
         def rupiah(angka):
-
-            return (
-                f"Rp{angka:,}"
-                .replace(",", ".")
-            )
-
-        # ==========================================
-        # BUAT PESAN
-        # ==========================================
+            return f"Rp{angka:,}".replace(",", ".")
 
         pesan = (
-            f"📊 REKAP KEUANGAN\n"
-            f"{nama_bulan_sekarang.upper()} {tahun}\n\n"
+            f"📊 REKAP KEUANGAN PERIODE\n"
+            f"📅 {awal_periode.strftime('%d/%m/%Y')} - {akhir_periode.strftime('%d/%m/%Y')}\n\n"
+            f"📥 PEMASUKAN\n"
         )
-
-        # ==========================================
-        # PEMASUKAN
-        # ==========================================
-
-        pesan += "📥 PEMASUKAN\n"
 
         if kategori_pemasukan:
-
-            for kategori, nominal in sorted(
-                kategori_pemasukan.items(),
-                key=lambda x: x[1],
-                reverse=True
-            ):
-
-                pesan += (
-                    f"💰 {kategori}: "
-                    f"{rupiah(nominal)}\n"
-                )
-
+            for kat, nom in sorted(kategori_pemasukan.items(), key=lambda x: x[1], reverse=True):
+                pesan += f"💰 {kat}: {rupiah(nom)}\n"
         else:
-
             pesan += "Tidak ada pemasukan.\n"
 
-        # ==========================================
-        # PENGELUARAN
-        # ==========================================
-
         pesan += "\n📤 PENGELUARAN\n"
-
         if kategori_pengeluaran:
-
-            for kategori, nominal in sorted(
-                kategori_pengeluaran.items(),
-                key=lambda x: x[1],
-                reverse=True
-            ):
-
-                pesan += (
-                    f"💸 {kategori}: "
-                    f"{rupiah(nominal)}\n"
-                )
-
+            for kat, nom in sorted(kategori_pengeluaran.items(), key=lambda x: x[1], reverse=True):
+                pesan += f"💸 {kat}: {rupiah(nom)}\n"
         else:
-
             pesan += "Tidak ada pengeluaran.\n"
 
-        # ==========================================
-        # TOTAL
-        # ==========================================
-
-        saldo_bulan = (
-            total_pemasukan
-            - total_pengeluaran
-        )
-
+        saldo_bulan = total_pemasukan - total_pengeluaran
         pesan += (
             "\n━━━━━━━━━━━━━━━━\n"
-            f"📥 Total Masuk: "
-            f"{rupiah(total_pemasukan)}\n"
-            f"📤 Total Keluar: "
-            f"{rupiah(total_pengeluaran)}\n"
-            f"💵 Sisa: "
-            f"{rupiah(saldo_bulan)}"
+            f"📥 Total Masuk: {rupiah(total_pemasukan)}\n"
+            f"📤 Total Keluar: {rupiah(total_pengeluaran)}\n"
+            f"💵 Sisa Periode: {rupiah(saldo_bulan)}"
         )
 
         await update.message.reply_text(pesan)
 
     except Exception as e:
-
         print("ERROR REKAP:", e)
+        await update.message.reply_text("❌ Gagal membuat rekap.")
 
-        await update.message.reply_text(
-            "❌ Gagal membuat rekap.\n\n"
-            "Cek PowerShell untuk melihat error."
-        )
+
 # ==========================================
-# HELP
+# HELP (DIPERBARUI SEMUA FITUR)
 # ==========================================
 
-async def help_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-
-        "🤖 FINANCE BOT FARHAN\n\n"
+        "🤖 FINANCE BOT FARHAN - MENU BANTUAN\n"
+        "📅 Periode Keuangan: Tanggal 11 s/d 10 Bulan Berikutnya\n\n"
 
         "📝 PENCATATAN TRANSAKSI\n"
-        "/tambah Pengeluaran Makan 30000 makan siang\n"
-        "/tambah Pengeluaran Bensin 50000 isi bensin\n"
-        "/tambah Pemasukan Gaji 5000000 gaji DENSO\n\n"
+        "• /tambah [Jenis] [Kategori] [Nominal] [Keterangan]\n"
+        "  Contoh: /tambah Pengeluaran Makan 30000 makan siang\n"
+        "  Contoh: /tambah Pemasukan Gaji 5000000 gaji DENSO\n\n"
 
-        "📊 INFORMASI KEUANGAN\n"
-        "/saldo → cek saldo saat ini\n"
-        "/riwayat → lihat 10 transaksi terakhir\n"
-        "/riwayat 20 → lihat 20 transaksi terakhir\n"
-        "/rekap → rekap keuangan bulan ini\n\n"
+        "📌 COMMAND CEPAT (LAMA)\n"
+        "• /makan [Nominal] [Keterangan]\n"
+        "  Contoh: /makan 25000 makan siang\n"
+        "• /bensin [Nominal] [Keterangan]\n"
+        "  Contoh: /bensin 50000 isi bensin\n\n"
 
         "✏️ KELOLA TRANSAKSI\n"
-        "/edit 25 Makan 35000 makan malam\n"
-        "/hapus 25 → hapus transaksi ID 25\n\n"
+        "• /riwayat [jumlah] → Lihat riwayat (opsional: /riwayat 20)\n"
+        "• /edit [ID] [Kategori] [Nominal] [Keterangan] → Edit transaksi\n"
+        "• /hapus [ID] → Hapus transaksi berdasarkan ID\n\n"
 
-        "📌 COMMAND LAMA\n"
-        "/makan 30000 makan siang\n"
-        "/bensin 50000 isi bensin\n\n"
+        "📊 INFORMASI & LAPORAN KEUANGAN\n"
+        "• /saldo → Cek saldo keseluruhan\n"
+        "• /rekap → Rekap singkat keuangan periode ini\n"
+        "• /laporan → Laporan keuangan bulanan lengkap (periode tgl 11)\n"
+        "• /statistik → Statistik & analisis pengeluaran periode ini\n"
+        "• /kategori [nama_kategori] → Cek rincian pengeluaran per kategori\n\n"
+
+        "💵 BUDGETING\n"
+        "• /budget → Cek status budget periode ini\n"
+        "• /budget [Kategori] [Nominal] → Atur budget per kategori untuk periode berjalan\n"
+        "  Contoh: /budget Makan 900000\n\n"
+
+        "🎯 TARGET KEUANGAN (TABUNGAN)\n"
+        "• /target [Nama Target] [Target Nominal] [Setoran Bulanan]\n"
+        "  Contoh: /target Laptop 6000000 500000\n"
+        "• /setor [ID Target] [Nominal] → Setor tabungan ke target\n"
+        "  Contoh: /setor 1 500000\n\n"
 
         "💡 Tips:\n"
-        "Gunakan /tambah untuk semua jenis transaksi."
+        "Setiap perhitungan laporan & budget otomatis direset per tanggal 11!"
     )
+
+
 # ==========================================
-# BUDGET
+# BUDGET (Siklus Tgl 11)
 # ==========================================
 
 async def budget(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
     try:
-
-        sekarang = datetime.now(timezone.utc)
-
-        # Awal bulan berjalan
-        awal_bulan = sekarang.replace(
-            day=1,
-            hour=0,
-            minute=0,
-            second=0,
-            microsecond=0
-        )
-
-        bulan = awal_bulan.date()
-
-        # ==========================================
-        # MODE TAMBAH / UPDATE BUDGET
-        # ==========================================
+        awal_periode, akhir_periode = get_periode_berjalan()
+        bulan_str = str(awal_periode.date())
 
         if context.args:
-
             if len(context.args) < 2:
-
                 await update.message.reply_text(
                     "❌ Format salah.\n\n"
-                    "Gunakan:\n"
-                    "/budget [Kategori] [Nominal]\n\n"
-                    "Contoh:\n"
-                    "/budget Makan 900000\n"
-                    "/budget Bensin 400000"
+                    "Gunakan:\n/budget [Kategori] [Nominal]\n\n"
+                    "Contoh:\n/budget Makan 900000"
                 )
-
                 return
 
             kategori = context.args[0]
-
             try:
-
                 nominal = int(context.args[1])
-
             except ValueError:
-
-                await update.message.reply_text(
-                    "❌ Nominal budget harus berupa angka.\n\n"
-                    "Contoh:\n"
-                    "/budget Makan 900000"
-                )
-
+                await update.message.reply_text("❌ Nominal harus berupa angka.")
                 return
 
             if nominal <= 0:
-
-                await update.message.reply_text(
-                    "❌ Nominal budget harus lebih dari 0."
-                )
-
+                await update.message.reply_text("❌ Nominal budget harus > 0.")
                 return
 
-            # Cek apakah budget sudah ada
             existing = (
                 supabase
                 .table("budget")
                 .select("*")
                 .eq("kategori", kategori)
-                .eq("bulan", str(bulan))
+                .eq("bulan", bulan_str)
                 .execute()
             )
 
             if existing.data:
-
-                # UPDATE
-                (
-                    supabase
-                    .table("budget")
-                    .update({
-                        "nominal": nominal
-                    })
-                    .eq("kategori", kategori)
-                    .eq("bulan", str(bulan))
-                    .execute()
-                )
-
+                supabase.table("budget").update({"nominal": nominal}).eq("kategori", kategori).eq("bulan", bulan_str).execute()
                 status = "✏️ Budget berhasil diperbarui."
-
             else:
-
-                # INSERT
-                (
-                    supabase
-                    .table("budget")
-                    .insert({
-                        "kategori": kategori,
-                        "bulan": str(bulan),
-                        "nominal": nominal
-                    })
-                    .execute()
-                )
-
+                supabase.table("budget").insert({"kategori": kategori, "bulan": bulan_str, "nominal": nominal}).execute()
                 status = "✅ Budget berhasil dibuat."
 
-            nominal_rupiah = (
-                f"Rp{nominal:,}"
-                .replace(",", ".")
-            )
-
+            nominal_rupiah = f"Rp{nominal:,}".replace(",", ".")
             await update.message.reply_text(
                 f"{status}\n\n"
                 f"🏷️ Kategori: {kategori}\n"
-                f"📅 Bulan: {bulan.strftime('%m/%Y')}\n"
+                f"📅 Periode Mulai: {awal_periode.strftime('%d/%m/%Y')}\n"
                 f"💰 Budget: {nominal_rupiah}"
             )
-
             return
 
-        # ==========================================
-        # MODE LIHAT BUDGET
-        # ==========================================
-
-        response = (
-            supabase
-            .table("budget")
-            .select("*")
-            .eq("bulan", str(bulan))
-            .execute()
-        )
-
+        # LIHAT BUDGET
+        response = supabase.table("budget").select("*").eq("bulan", bulan_str).execute()
         budget_data = response.data
 
         if not budget_data:
-
             await update.message.reply_text(
-                "💰 BELUM ADA BUDGET\n\n"
-                "Buat budget dengan format:\n\n"
-                "/budget Makan 900000\n"
-                "/budget Bensin 400000"
+                "💰 BELUM ADA BUDGET PERIODE INI\n\n"
+                f"Periode saat ini: {awal_periode.strftime('%d/%m/%Y')} - {akhir_periode.strftime('%d/%m/%Y')}\n\n"
+                "Buat budget dengan format:\n/budget Makan 900000"
             )
-
             return
 
-        # ==========================================
-        # AMBIL TRANSAKSI BULAN INI
-        # ==========================================
-
-        transaksi_response = (
-            supabase
-            .table("transaksi")
-            .select("kategori, nominal, jenis, tanggal")
-            .execute()
-        )
-
-        transaksi_data = transaksi_response.data
-
+        transaksi_response = supabase.table("transaksi").select("kategori, nominal, jenis, tanggal").execute()
         pemakaian = {}
 
-        for transaksi in transaksi_data:
-
+        for transaksi in transaksi_response.data:
             jenis = transaksi.get("jenis", "")
             kategori = transaksi.get("kategori", "")
-            nominal_transaksi = transaksi.get("nominal", 0)
             tanggal = transaksi.get("tanggal")
 
-            if jenis.lower() != "pengeluaran":
-                continue
-
-            if not tanggal:
+            if jenis.lower() != "pengeluaran" or not tanggal:
                 continue
 
             try:
-
-                tanggal_dt = datetime.fromisoformat(
-                    tanggal.replace("Z", "+00:00")
-                )
-
+                tanggal_dt = datetime.fromisoformat(tanggal.replace("Z", "+00:00"))
             except (ValueError, TypeError):
-
                 continue
 
-            if (
-                tanggal_dt.year != sekarang.year
-                or tanggal_dt.month != sekarang.month
-            ):
+            if not (awal_periode <= tanggal_dt <= akhir_periode):
                 continue
 
             try:
-
-                nominal_transaksi = int(nominal_transaksi)
-
+                nominal_transaksi = int(transaksi.get("nominal", 0))
             except (ValueError, TypeError):
-
                 nominal_transaksi = 0
 
-            pemakaian[kategori] = (
-                pemakaian.get(kategori, 0)
-                + nominal_transaksi
-            )
-
-        # ==========================================
-        # FORMAT
-        # ==========================================
+            pemakaian[kategori] = pemakaian.get(kategori, 0) + nominal_transaksi
 
         def rupiah(angka):
+            return f"Rp{angka:,}".replace(",", ".")
 
-            return (
-                f"Rp{angka:,}"
-                .replace(",", ".")
-            )
-
-        pesan = (
-            f"💰 BUDGET "
-            f"{sekarang.strftime('%B').upper()} "
-            f"{sekarang.year}\n\n"
-        )
+        pesan = f"💰 BUDGET PERIODE ({awal_periode.strftime('%d/%m')} - {akhir_periode.strftime('%d/%m/%Y')})\n\n"
 
         for item in budget_data:
-
             kategori = item.get("kategori", "-")
-            budget_nominal = item.get("nominal", 0)
-
             try:
-
-                budget_nominal = int(budget_nominal)
-
+                budget_nominal = int(item.get("nominal", 0))
             except (ValueError, TypeError):
-
                 budget_nominal = 0
 
             terpakai = pemakaian.get(kategori, 0)
-
             sisa = budget_nominal - terpakai
-
-            if budget_nominal > 0:
-
-                persen = (
-                    terpakai / budget_nominal
-                ) * 100
-
-            else:
-
-                persen = 0
-
-            # ==========================================
-            # STATUS
-            # ==========================================
+            persen = (terpakai / budget_nominal * 100) if budget_nominal > 0 else 0
 
             if sisa < 0:
-
-                status = (
-                    f"🚨 MELEBIHI "
-                    f"{rupiah(abs(sisa))}"
-                )
-
+                status = f"🚨 MELEBIHI {rupiah(abs(sisa))}"
             elif persen >= 80:
-
                 status = "⚠️ Mendekati batas"
-
             else:
-
                 status = "🟢 Aman"
 
             pesan += (
@@ -1511,1113 +825,398 @@ async def budget(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(pesan)
 
     except Exception as e:
-
         print("ERROR BUDGET:", e)
+        await update.message.reply_text("❌ Gagal memproses budget.")
 
-        await update.message.reply_text(
-            "❌ Gagal memproses budget.\n\n"
-            "Cek PowerShell untuk melihat error."
-        )
+
 # ==========================================
-# CEK PERINGATAN BUDGET
+# CEK PERINGATAN BUDGET (Siklus Tgl 11)
 # ==========================================
 
-async def cek_budget_setelah_transaksi(
-    kategori: str,
-    jenis: str
-):
-
+async def cek_budget_setelah_transaksi(kategori: str, jenis: str):
     try:
-
         if jenis.lower() != "pengeluaran":
             return None
 
-        sekarang = datetime.now(timezone.utc)
+        awal_periode, akhir_periode = get_periode_berjalan()
+        bulan_str = str(awal_periode.date())
 
-        bulan = sekarang.replace(
-            day=1,
-            hour=0,
-            minute=0,
-            second=0,
-            microsecond=0
-        ).date()
-
-        # ==========================================
-        # CARI BUDGET
-        # ==========================================
-
-        budget_response = (
-            supabase
-            .table("budget")
-            .select("kategori, nominal")
-            .eq("bulan", str(bulan))
-            .execute()
-        )
-
+        budget_response = supabase.table("budget").select("kategori, nominal").eq("bulan", bulan_str).execute()
         budget_data = budget_response.data
-        print("DEBUG KATEGORI:", kategori)
-        print("DEBUG JENIS:", jenis)
-        print("DEBUG BULAN:", bulan)
-        print("DEBUG DATA BUDGET:", budget_data)
 
         budget_item = None
-
         for item in budget_data:
-
-            if (
-                str(item.get("kategori", "")).strip().lower()
-                == kategori.strip().lower()
-            ):
+            if str(item.get("kategori", "")).strip().lower() == kategori.strip().lower():
                 budget_item = item
                 break
 
         if not budget_item:
             return None
 
-        budget_nominal = int(
-            budget_item.get("nominal", 0)
-        )
+        budget_nominal = int(budget_item.get("nominal", 0))
 
-        # ==========================================
-        # AMBIL SEMUA TRANSAKSI
-        # ==========================================
-
-        transaksi_response = (
-            supabase
-            .table("transaksi")
-            .select(
-                "kategori, nominal, jenis, tanggal"
-            )
-            .eq("jenis", "Pengeluaran")
-            .execute()
-        )
-
+        transaksi_response = supabase.table("transaksi").select("kategori, nominal, jenis, tanggal").eq("jenis", "Pengeluaran").execute()
         terpakai = 0
 
         for transaksi in transaksi_response.data:
-
-            transaksi_kategori = str(
-                transaksi.get("kategori", "")
-            ).strip().lower()
-
-            # Cocokkan kategori tanpa peduli huruf besar/kecil
-            if transaksi_kategori != kategori.strip().lower():
+            if str(transaksi.get("kategori", "")).strip().lower() != kategori.strip().lower():
                 continue
 
             tanggal = transaksi.get("tanggal")
-
             if not tanggal:
                 continue
 
             try:
-
-                tanggal_dt = datetime.fromisoformat(
-                    tanggal.replace("Z", "+00:00")
-                )
-
+                tanggal_dt = datetime.fromisoformat(tanggal.replace("Z", "+00:00"))
             except (ValueError, TypeError):
-
                 continue
 
-            # Pastikan bulan dan tahun sama
-            if (
-                tanggal_dt.year == sekarang.year
-                and tanggal_dt.month == sekarang.month
-            ):
-
-                terpakai += int(
-                    transaksi.get("nominal", 0)
-                )
-
-        # ==========================================
-        # HITUNG
-        # ==========================================
+            if awal_periode <= tanggal_dt <= akhir_periode:
+                terpakai += int(transaksi.get("nominal", 0))
 
         if budget_nominal <= 0:
             return None
 
-        persen = (
-            terpakai / budget_nominal
-        ) * 100
-
+        persen = (terpakai / budget_nominal) * 100
         sisa = budget_nominal - terpakai
 
         def rupiah(angka):
-
-            return (
-                f"Rp{abs(int(angka)):,}"
-                .replace(",", ".")
-            )
-
-        # ==========================================
-        # BUDGET TERLEWATI
-        # ==========================================
+            return f"Rp{abs(int(angka)):,}".replace(",", ".")
 
         if terpakai > budget_nominal:
-
             return (
-                f"\n\n"
-                f"🚨 PERINGATAN BUDGET\n\n"
+                f"\n\n🚨 PERINGATAN BUDGET\n"
                 f"🏷️ {kategori}\n"
                 f"💰 Budget: {rupiah(budget_nominal)}\n"
                 f"💸 Terpakai: {rupiah(terpakai)}\n"
                 f"🔴 Kelebihan: {rupiah(sisa)}\n"
-                f"📊 Pemakaian: {persen:.0f}%\n\n"
-                f"🚨 Budget kategori ini "
-                f"sudah terlewati."
+                f"📊 Pemakaian: {persen:.0f}%\n"
+                f"🚨 Budget periode ini sudah terlewati."
             )
 
-        # ==========================================
-        # BUDGET ≥ 80%
-        # ==========================================
-
         if persen >= 80:
-
             return (
-                f"\n\n"
-                f"⚠️ PERINGATAN BUDGET\n\n"
+                f"\n\n⚠️ PERINGATAN BUDGET\n"
                 f"🏷️ {kategori}\n"
                 f"💰 Budget: {rupiah(budget_nominal)}\n"
                 f"💸 Terpakai: {rupiah(terpakai)}\n"
                 f"🟢 Sisa: {rupiah(sisa)}\n"
-                f"📊 Pemakaian: {persen:.0f}%\n\n"
-                f"⚠️ Budget sudah hampir habis."
+                f"📊 Pemakaian: {persen:.0f}%\n"
+                f"⚠️ Budget hampir habis."
             )
 
         return None
 
     except Exception as e:
-
-        print(
-            "ERROR CEK BUDGET:",
-            repr(e)
-        )
-
+        print("ERROR CEK BUDGET:", repr(e))
         return None
+
+
 # ==========================================
-# MAIN
-# ==========================================
-# ==========================================
-# LAPORAN BULANAN PRO
+# LAPORAN BULANAN PRO (Siklus Tgl 11)
 # ==========================================
 
 async def laporan(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
     try:
-
-        # ==========================================
-        # WAKTU
-        # ==========================================
-
-        sekarang = datetime.now(timezone.utc)
-
-        tahun = sekarang.year
-        bulan = sekarang.month
-
-        nama_bulan = [
-            "Januari",
-            "Februari",
-            "Maret",
-            "April",
-            "Mei",
-            "Juni",
-            "Juli",
-            "Agustus",
-            "September",
-            "Oktober",
-            "November",
-            "Desember"
-        ][bulan - 1]
-
-        # ==========================================
-        # FORMAT RUPIAH
-        # ==========================================
+        awal_periode, akhir_periode = get_periode_berjalan()
 
         def rupiah(angka):
-
             angka = int(angka)
+            return f"-Rp{abs(angka):,}".replace(",", ".") if angka < 0 else f"Rp{angka:,}".replace(",", ".")
 
-            if angka < 0:
-                return f"-Rp{abs(angka):,}".replace(",", ".")
-
-            return f"Rp{angka:,}".replace(",", ".")
-
-        # ==========================================
-        # AMBIL TRANSAKSI
-        # ==========================================
-
-        transaksi_response = (
-            supabase
-            .table("transaksi")
-            .select(
-                "id, jenis, kategori, nominal, tanggal"
-            )
-            .execute()
-        )
-
+        transaksi_response = supabase.table("transaksi").select("id, jenis, kategori, nominal, tanggal").execute()
         data = transaksi_response.data
 
         pemasukan = 0
         pengeluaran = 0
         jumlah_transaksi = 0
-
         kategori_pengeluaran = {}
 
-        # ==========================================
-        # FILTER TRANSAKSI BULAN BERJALAN
-        # ==========================================
-
         for transaksi in data:
-
             tanggal = transaksi.get("tanggal")
-
             if not tanggal:
                 continue
 
             try:
-
-                tanggal_dt = datetime.fromisoformat(
-                    tanggal.replace("Z", "+00:00")
-                )
-
+                tanggal_dt = datetime.fromisoformat(tanggal.replace("Z", "+00:00"))
             except (ValueError, TypeError):
-
                 continue
 
-            if (
-                tanggal_dt.year != tahun
-                or tanggal_dt.month != bulan
-            ):
+            if not (awal_periode <= tanggal_dt <= akhir_periode):
                 continue
 
             jumlah_transaksi += 1
-
-            jenis = str(
-                transaksi.get("jenis", "")
-            ).strip().lower()
-
-            kategori = str(
-                transaksi.get("kategori", "Lainnya")
-            ).strip()
+            jenis = str(transaksi.get("jenis", "")).strip().lower()
+            kategori = str(transaksi.get("kategori", "Lainnya")).strip()
 
             try:
-
-                nominal = int(
-                    transaksi.get("nominal", 0)
-                )
-
+                nominal = int(transaksi.get("nominal", 0))
             except (ValueError, TypeError):
-
                 nominal = 0
 
-            # ==========================================
-            # PEMASUKAN
-            # ==========================================
-
             if jenis == "pemasukan":
-
                 pemasukan += nominal
-
-            # ==========================================
-            # PENGELUARAN
-            # ==========================================
-
             elif jenis == "pengeluaran":
-
                 pengeluaran += nominal
-
                 key = kategori.lower()
-
                 if key not in kategori_pengeluaran:
-
-                    kategori_pengeluaran[key] = {
-                        "nama": kategori,
-                        "nominal": 0
-                    }
-
+                    kategori_pengeluaran[key] = {"nama": kategori, "nominal": 0}
                 kategori_pengeluaran[key]["nominal"] += nominal
 
-        # ==========================================
-        # SALDO
-        # ==========================================
-
         saldo = pemasukan - pengeluaran
+        kategori_sorted = sorted(kategori_pengeluaran.values(), key=lambda x: x["nominal"], reverse=True)
 
-        # ==========================================
-        # SORT KATEGORI
-        # ==========================================
-
-        kategori_sorted = sorted(
-            kategori_pengeluaran.values(),
-            key=lambda x: x["nominal"],
-            reverse=True
-        )
-
-        # ==========================================
-        # AMBIL BUDGET BULAN INI
-        # ==========================================
-
-        tanggal_bulan = (
-            f"{tahun}-{bulan:02d}-01"
-        )
-
-        budget_response = (
-            supabase
-            .table("budget")
-            .select("kategori, nominal")
-            .eq("bulan", tanggal_bulan)
-            .execute()
-        )
-
+        bulan_str = str(awal_periode.date())
+        budget_response = supabase.table("budget").select("kategori, nominal").eq("bulan", bulan_str).execute()
         budget_data = budget_response.data
 
-        # ==========================================
-        # BUAT DICTIONARY BUDGET
-        # ==========================================
-
         budget_dict = {}
-
         for item in budget_data:
-
-            kategori_budget = str(
-                item.get("kategori", "")
-            ).strip()
-
+            kategori_budget = str(item.get("kategori", "")).strip()
             try:
-
-                nominal_budget = int(
-                    item.get("nominal", 0)
-                )
-
+                nominal_budget = int(item.get("nominal", 0))
             except (ValueError, TypeError):
-
                 nominal_budget = 0
-
-            budget_dict[
-                kategori_budget.lower()
-            ] = {
-                "nama": kategori_budget,
-                "nominal": nominal_budget
-            }
-
-        # ==========================================
-        # HEADER LAPORAN
-        # ==========================================
+            budget_dict[kategori_budget.lower()] = {"nama": kategori_budget, "nominal": nominal_budget}
 
         pesan = (
-            f"📊 LAPORAN {nama_bulan.upper()} {tahun}\n"
+            f"📊 LAPORAN KEUANGAN PERIODE\n"
+            f"📅 {awal_periode.strftime('%d/%m/%Y')} - {akhir_periode.strftime('%d/%m/%Y')}\n"
             f"━━━━━━━━━━━━━━━━\n\n"
-
-            f"📥 PEMASUKAN\n"
-            f"{rupiah(pemasukan)}\n\n"
-
-            f"💸 PENGELUARAN\n"
-            f"{rupiah(pengeluaran)}\n\n"
+            f"📥 PEMASUKAN\n{rupiah(pemasukan)}\n\n"
+            f"💸 PENGELUARAN\n{rupiah(pengeluaran)}\n\n"
         )
 
-        # ==========================================
-        # SALDO
-        # ==========================================
-
-        if saldo > 0:
-
-            pesan += (
-                f"💰 SALDO BERSIH\n"
-                f"🟢 {rupiah(saldo)}\n\n"
-            )
-
-        elif saldo < 0:
-
-            pesan += (
-                f"💰 SALDO BERSIH\n"
-                f"🔴 {rupiah(saldo)}\n\n"
-            )
-
-        else:
-
-            pesan += (
-                f"💰 SALDO BERSIH\n"
-                f"🟡 {rupiah(saldo)}\n\n"
-            )
-
-        # ==========================================
-        # JUMLAH TRANSAKSI
-        # ==========================================
-
-        pesan += (
-            f"📋 TRANSAKSI\n"
-            f"{jumlah_transaksi} transaksi\n\n"
-        )
-
-        # ==========================================
-        # PENGELUARAN PER KATEGORI
-        # ==========================================
+        pesan += f"💰 SALDO BERSIH\n" + ("🟢 " if saldo > 0 else ("🔴 " if saldo < 0 else "🟡 ")) + f"{rupiah(saldo)}\n\n"
+        pesan += f"📋 TRANSAKSI: {jumlah_transaksi} transaksi\n\n"
 
         if kategori_sorted:
-
-            pesan += (
-                "🏷️ PENGELUARAN PER KATEGORI\n\n"
-            )
-
+            pesan += "🏷️ PENGELUARAN PER KATEGORI\n\n"
             for item in kategori_sorted:
-
                 nama = item["nama"]
                 nominal = item["nominal"]
-
-                if pengeluaran > 0:
-
-                    persen = (
-                        nominal
-                        / pengeluaran
-                    ) * 100
-
-                else:
-
-                    persen = 0
-
-                pesan += (
-                    f"• {nama}: "
-                    f"{rupiah(nominal)} "
-                    f"({persen:.0f}%)\n"
-                )
-
+                persen = (nominal / pengeluaran * 100) if pengeluaran > 0 else 0
+                pesan += f"• {nama}: {rupiah(nominal)} ({persen:.0f}%)\n"
             pesan += "\n"
-
         else:
-
-            pesan += (
-                "🏷️ PENGELUARAN PER KATEGORI\n\n"
-                "Belum ada pengeluaran.\n\n"
-            )
-
-        # ==========================================
-        # PENGELUARAN TERBESAR
-        # ==========================================
+            pesan += "🏷️ PENGELUARAN PER KATEGORI\n\nBelum ada pengeluaran.\n\n"
 
         if kategori_sorted:
-
             terbesar = kategori_sorted[0]
-
-            pesan += (
-                "🏆 PENGELUARAN TERBESAR\n"
-                f"{terbesar['nama']}: "
-                f"{rupiah(terbesar['nominal'])}\n\n"
-            )
-
-        # ==========================================
-        # ANALISIS BUDGET
-        # ==========================================
+            pesan += f"🏆 PENGELUARAN TERBESAR\n{terbesar['nama']}: {rupiah(terbesar['nominal'])}\n\n"
 
         if budget_dict:
-
-            pesan += (
-                "💳 STATUS BUDGET\n\n"
-            )
-
-            # Gabungkan kategori budget dan transaksi
-            semua_kategori = set(
-                list(budget_dict.keys())
-                + list(kategori_pengeluaran.keys())
-            )
+            pesan += "💳 STATUS BUDGET PERIODE INI\n\n"
+            semua_kategori = set(list(budget_dict.keys()) + list(kategori_pengeluaran.keys()))
 
             for key in sorted(semua_kategori):
-
                 nama = key
-
                 budget_nominal = 0
                 terpakai = 0
 
-                # Budget
                 if key in budget_dict:
-
                     nama = budget_dict[key]["nama"]
                     budget_nominal = budget_dict[key]["nominal"]
-
-                # Pengeluaran
                 if key in kategori_pengeluaran:
-
                     nama = kategori_pengeluaran[key]["nama"]
                     terpakai = kategori_pengeluaran[key]["nominal"]
 
-                # Jika tidak ada budget
                 if budget_nominal <= 0:
-
-                    pesan += (
-                        f"• {nama}\n"
-                        f"  Terpakai: {rupiah(terpakai)}\n"
-                        f"  ⚪ Belum ada budget\n\n"
-                    )
-
+                    pesan += f"• {nama}\n  Terpakai: {rupiah(terpakai)}\n  ⚪ Belum ada budget\n\n"
                     continue
 
                 sisa = budget_nominal - terpakai
+                persen_budget = (terpakai / budget_nominal) * 100
 
-                persen_budget = (
-                    terpakai
-                    / budget_nominal
-                ) * 100
-
-                # ==========================================
-                # STATUS
-                # ==========================================
-
-                if terpakai > budget_nominal:
-
-                    status = (
-                        f"🚨 MELEBIHI "
-                        f"{rupiah(abs(sisa))}"
-                    )
-
-                elif persen_budget >= 80:
-
-                    status = (
-                        "⚠️ MENDEKATI BATAS"
-                    )
-
-                else:
-
-                    status = (
-                        "🟢 AMAN"
-                    )
+                status = f"🚨 MELEBIHI {rupiah(abs(sisa))}" if terpakai > budget_nominal else ("⚠️ MENDEKATI BATAS" if persen_budget >= 80 else "🟢 AMAN")
 
                 pesan += (
                     f"• {nama}\n"
                     f"  Budget: {rupiah(budget_nominal)}\n"
                     f"  Terpakai: {rupiah(terpakai)}\n"
                     f"  Sisa: {rupiah(sisa)}\n"
-                    f"  Pemakaian: "
-                    f"{persen_budget:.0f}%\n"
+                    f"  Pemakaian: {persen_budget:.0f}%\n"
                     f"  Status: {status}\n\n"
                 )
-
         else:
+            pesan += "💳 STATUS BUDGET\n\n⚪ Belum ada budget periode ini.\n\n"
 
-            pesan += (
-                "💳 STATUS BUDGET\n\n"
-                "⚪ Belum ada budget "
-                "untuk bulan ini.\n\n"
-            )
-
-        # ==========================================
-        # STATUS KEUANGAN
-        # ==========================================
-
-        pesan += (
-            "━━━━━━━━━━━━━━━━\n"
-        )
-
+        pesan += "━━━━━━━━━━━━━━━━\n"
         if saldo > 0:
-
-            pesan += (
-                "🟢 KONDISI KEUANGAN\n"
-                "Keuangan bulan ini SURPLUS."
-            )
-
+            pesan += "🟢 KONDISI KEUANGAN: Keuangan periode ini SURPLUS."
         elif saldo < 0:
-
-            pesan += (
-                "🔴 KONDISI KEUANGAN\n"
-                "Pengeluaran lebih besar "
-                "daripada pemasukan."
-            )
-
+            pesan += "🔴 KONDISI KEUANGAN: Pengeluaran lebih besar dari pemasukan."
         else:
-
-            pesan += (
-                "🟡 KONDISI KEUANGAN\n"
-                "Pemasukan dan pengeluaran "
-                "seimbang."
-            )
-
-        # ==========================================
-        # KIRIM
-        # ==========================================
+            pesan += "🟡 KONDISI KEUANGAN: Pemasukan dan pengeluaran seimbang."
 
         await update.message.reply_text(pesan)
 
     except Exception as e:
-
         print("ERROR LAPORAN:", repr(e))
+        await update.message.reply_text("❌ Gagal membuat laporan bulanan.")
 
-        await update.message.reply_text(
-            "❌ Gagal membuat laporan bulanan.\n\n"
-            "Cek PowerShell untuk melihat error."
-        )
 
 # ==========================================
-# STATISTIK KEUANGAN
+# STATISTIK KEUANGAN (Siklus Tgl 11)
 # ==========================================
 
 async def statistik(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
     try:
-        sekarang = datetime.now(timezone.utc)
+        awal_periode, akhir_periode = get_periode_berjalan()
 
-        tahun = sekarang.year
-        bulan = sekarang.month
-
-        nama_bulan = [
-            "Januari", "Februari", "Maret", "April",
-            "Mei", "Juni", "Juli", "Agustus",
-            "September", "Oktober", "November", "Desember"
-        ][bulan - 1]
-
-        # ==========================================
-        # AMBIL TRANSAKSI
-        # ==========================================
-
-        response = (
-            supabase
-            .table("transaksi")
-            .select("id, jenis, kategori, nominal, tanggal")
-            .execute()
-        )
-
+        response = supabase.table("transaksi").select("id, jenis, kategori, nominal, tanggal").execute()
         data = response.data
 
         pemasukan = 0
         pengeluaran = 0
-
         jumlah_pemasukan = 0
         jumlah_pengeluaran = 0
-
         kategori_pengeluaran = {}
 
-        # ==========================================
-        # FILTER BULAN BERJALAN
-        # ==========================================
-
         for transaksi in data:
-
             tanggal = transaksi.get("tanggal")
-
             if not tanggal:
                 continue
 
             try:
-                tanggal_dt = datetime.fromisoformat(
-                    tanggal.replace("Z", "+00:00")
-                )
-
+                tanggal_dt = datetime.fromisoformat(tanggal.replace("Z", "+00:00"))
             except (ValueError, TypeError):
                 continue
 
-            if (
-                tanggal_dt.year != tahun
-                or tanggal_dt.month != bulan
-            ):
+            if not (awal_periode <= tanggal_dt <= akhir_periode):
                 continue
 
-            jenis = str(
-                transaksi.get("jenis", "")
-            ).strip().lower()
-
-            kategori = str(
-                transaksi.get("kategori", "Lainnya")
-            ).strip()
+            jenis = str(transaksi.get("jenis", "")).strip().lower()
+            kategori = str(transaksi.get("kategori", "Lainnya")).strip()
 
             try:
-                nominal = int(
-                    transaksi.get("nominal", 0)
-                )
+                nominal = int(transaksi.get("nominal", 0))
             except (ValueError, TypeError):
                 nominal = 0
 
-            # ==========================================
-            # PEMASUKAN
-            # ==========================================
-
             if jenis == "pemasukan":
-
                 pemasukan += nominal
                 jumlah_pemasukan += 1
-
-            # ==========================================
-            # PENGELUARAN
-            # ==========================================
-
             elif jenis == "pengeluaran":
-
                 pengeluaran += nominal
                 jumlah_pengeluaran += 1
-
                 kategori_key = kategori.lower()
-
                 if kategori_key not in kategori_pengeluaran:
+                    kategori_pengeluaran[kategori_key] = {"nama": kategori, "nominal": 0}
+                kategori_pengeluaran[kategori_key]["nominal"] += nominal
 
-                    kategori_pengeluaran[kategori_key] = {
-                        "nama": kategori,
-                        "nominal": 0
-                    }
-
-                kategori_pengeluaran[
-                    kategori_key
-                ]["nominal"] += nominal
-
-        # ==========================================
-        # PERHITUNGAN
-        # ==========================================
-
-        total_transaksi = (
-            jumlah_pemasukan
-            + jumlah_pengeluaran
-        )
-
-        if jumlah_pengeluaran > 0:
-
-            rata_pengeluaran = (
-                pengeluaran / jumlah_pengeluaran
-            )
-
-        else:
-
-            rata_pengeluaran = 0
-
-        saldo_bersih = (
-            pemasukan - pengeluaran
-        )
-
-        # ==========================================
-        # FORMAT RUPIAH
-        # ==========================================
+        total_transaksi = jumlah_pemasukan + jumlah_pengeluaran
+        rata_pengeluaran = (pengeluaran / jumlah_pengeluaran) if jumlah_pengeluaran > 0 else 0
 
         def rupiah(angka):
+            return f"Rp{int(angka):,}".replace(",", ".")
 
-            return (
-                f"Rp{int(angka):,}"
-                .replace(",", ".")
-            )
-
-        # ==========================================
-        # KATEGORI TERBOROS
-        # ==========================================
-
-        kategori_sorted = sorted(
-            kategori_pengeluaran.values(),
-            key=lambda x: x["nominal"],
-            reverse=True
-        )
-
-        # ==========================================
-        # BUAT PESAN
-        # ==========================================
+        kategori_sorted = sorted(kategori_pengeluaran.values(), key=lambda x: x["nominal"], reverse=True)
 
         pesan = (
             f"📈 STATISTIK KEUANGAN\n"
             f"━━━━━━━━━━━━━━━━\n\n"
-
-            f"📅 {nama_bulan} {tahun}\n\n"
-
-            f"💰 TOTAL PEMASUKAN\n"
-            f"{rupiah(pemasukan)}\n\n"
-
-            f"💸 TOTAL PENGELUARAN\n"
-            f"{rupiah(pengeluaran)}\n\n"
-
-            f"📊 RATA-RATA PENGELUARAN\n"
-            f"{rupiah(rata_pengeluaran)} / transaksi\n\n"
-
+            f"📅 Periode: {awal_periode.strftime('%d/%m/%Y')} - {akhir_periode.strftime('%d/%m/%Y')}\n\n"
+            f"💰 TOTAL PEMASUKAN\n{rupiah(pemasukan)}\n\n"
+            f"💸 TOTAL PENGELUARAN\n{rupiah(pengeluaran)}\n\n"
+            f"📊 RATA-RATA PENGELUARAN\n{rupiah(rata_pengeluaran)} / transaksi\n\n"
             f"📋 TRANSAKSI\n"
             f"📥 Pemasukan   : {jumlah_pemasukan}\n"
             f"💸 Pengeluaran : {jumlah_pengeluaran}\n"
             f"📊 Total       : {total_transaksi}\n\n"
         )
 
-        # ==========================================
-        # KATEGORI TERBOROS
-        # ==========================================
-
         if kategori_sorted:
-
             terbesar = kategori_sorted[0]
-
-            nama_terbesar = terbesar["nama"]
-            nominal_terbesar = terbesar["nominal"]
-
-            if pengeluaran > 0:
-
-                persen_terbesar = (
-                    nominal_terbesar
-                    / pengeluaran
-                ) * 100
-
-            else:
-
-                persen_terbesar = 0
-
-            pesan += (
-                f"🏆 KATEGORI TERBOROS\n"
-                f"🏷️ {nama_terbesar}\n"
-                f"{rupiah(nominal_terbesar)} "
-                f"({persen_terbesar:.0f}%)\n\n"
-            )
-
-        # ==========================================
-        # ANALISIS KEUANGAN
-        # ==========================================
+            persen_terbesar = (terbesar["nominal"] / pengeluaran * 100) if pengeluaran > 0 else 0
+            pesan += f"🏆 KATEGORI TERBOROS\n🏷️ {terbesar['nama']}\n{rupiah(terbesar['nominal'])} ({persen_terbesar:.0f}%)\n\n"
 
         pesan += "⚠️ ANALISIS\n"
-
         if total_transaksi == 0:
-
-            pesan += (
-                "Belum ada transaksi "
-                "pada bulan ini."
-            )
-
+            pesan += "Belum ada transaksi pada periode ini."
         elif pengeluaran > pemasukan:
-
-            pesan += (
-                "Pengeluaran kamu lebih besar "
-                "daripada pemasukan bulan ini.\n\n"
-                "💡 Perhatikan pengeluaran "
-                "terutama pada kategori terbesar."
-            )
-
+            pesan += "Pengeluaran kamu lebih besar daripada pemasukan periode ini.\n\n💡 Perhatikan pengeluaran pada kategori terbesar."
         elif pengeluaran == pemasukan:
-
-            pesan += (
-                "Pemasukan dan pengeluaran "
-                "berada pada jumlah yang sama.\n\n"
-                "💡 Usahakan mulai menyisihkan "
-                "sebagian pemasukan untuk tabungan."
-            )
-
+            pesan += "Pemasukan dan pengeluaran sama.\n\n💡 Usahakan mulai menyisihkan tabungan."
         else:
+            pesan += "Kondisi keuangan periode ini masih positif.\n\n💡 Pertahankan pengeluaran agar tetap aman."
 
-            pesan += (
-                "Kondisi keuangan bulan ini "
-                "masih positif.\n\n"
-                "💡 Pertahankan pengeluaran "
-                "agar tetap di bawah pemasukan."
-            )
-
-        # ==========================================
-        # RESPONSE
-        # ==========================================
-
-        pesan += (
-            "\n━━━━━━━━━━━━━━━━"
-        )
-
+        pesan += "\n━━━━━━━━━━━━━━━━"
         await update.message.reply_text(pesan)
 
     except Exception as e:
-
         print("ERROR STATISTIK:", e)
+        await update.message.reply_text("❌ Gagal membuat statistik.")
 
-        await update.message.reply_text(
-            "❌ Gagal membuat statistik.\n\n"
-            "Cek PowerShell untuk melihat error."
-        )
 
 # ==========================================
-# KATEGORI PENGELUARAN
+# KATEGORI PENGELUARAN (Siklus Tgl 11)
 # ==========================================
 
 async def kategori(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
     try:
-
-        sekarang = datetime.now(timezone.utc)
-
-        tahun = sekarang.year
-        bulan = sekarang.month
-
-        nama_bulan = [
-            "Januari", "Februari", "Maret", "April",
-            "Mei", "Juni", "Juli", "Agustus",
-            "September", "Oktober", "November", "Desember"
-        ][bulan - 1]
-
-        # ==========================================
-        # FILTER KATEGORI
-        # ==========================================
+        awal_periode, akhir_periode = get_periode_berjalan()
 
         kategori_filter = None
-
         if context.args:
             kategori_filter = " ".join(context.args).strip().lower()
 
-        # ==========================================
-        # AMBIL TRANSAKSI
-        # ==========================================
-
-        response = (
-            supabase
-            .table("transaksi")
-            .select("id, jenis, kategori, nominal, tanggal")
-            .eq("jenis", "Pengeluaran")
-            .execute()
-        )
-
+        response = supabase.table("transaksi").select("id, jenis, kategori, nominal, tanggal").eq("jenis", "Pengeluaran").execute()
         data = response.data
-
         kategori_data = {}
 
-        # ==========================================
-        # FILTER BULAN
-        # ==========================================
-
         for transaksi in data:
-
             tanggal = transaksi.get("tanggal")
-
             if not tanggal:
                 continue
 
             try:
-
-                tanggal_dt = datetime.fromisoformat(
-                    tanggal.replace("Z", "+00:00")
-                )
-
+                tanggal_dt = datetime.fromisoformat(tanggal.replace("Z", "+00:00"))
             except (ValueError, TypeError):
-
                 continue
 
-            if (
-                tanggal_dt.year != tahun
-                or tanggal_dt.month != bulan
-            ):
+            if not (awal_periode <= tanggal_dt <= akhir_periode):
                 continue
 
-            nama_kategori = str(
-                transaksi.get("kategori", "Lainnya")
-            ).strip()
+            nama_kategori = str(transaksi.get("kategori", "Lainnya")).strip()
 
-            # ==========================================
-            # FILTER KATEGORI TERTENTU
-            # ==========================================
-
-            if kategori_filter:
-
-                if nama_kategori.lower() != kategori_filter:
-                    continue
+            if kategori_filter and nama_kategori.lower() != kategori_filter:
+                continue
 
             try:
-
-                nominal = int(
-                    transaksi.get("nominal", 0)
-                )
-
+                nominal = int(transaksi.get("nominal", 0))
             except (ValueError, TypeError):
-
                 nominal = 0
 
             key = nama_kategori.lower()
-
             if key not in kategori_data:
-
-                kategori_data[key] = {
-                    "nama": nama_kategori,
-                    "nominal": 0,
-                    "jumlah": 0
-                }
+                kategori_data[key] = {"nama": nama_kategori, "nominal": 0, "jumlah": 0}
 
             kategori_data[key]["nominal"] += nominal
             kategori_data[key]["jumlah"] += 1
 
-        # ==========================================
-        # BELUM ADA DATA
-        # ==========================================
-
         if not kategori_data:
-
-            if kategori_filter:
-
-                await update.message.reply_text(
-                    f"📊 KATEGORI {kategori_filter.upper()}\n\n"
-                    f"📅 {nama_bulan} {tahun}\n\n"
-                    "⚪ Belum ada pengeluaran "
-                    "untuk kategori ini."
-                )
-
-            else:
-
-                await update.message.reply_text(
-                    f"📊 PENGELUARAN PER KATEGORI\n\n"
-                    f"📅 {nama_bulan} {tahun}\n\n"
-                    "⚪ Belum ada pengeluaran "
-                    "bulan ini."
-                )
-
+            pesan_kosong = f"📊 KATEGORI {kategori_filter.upper()}\n\n" if kategori_filter else "📊 PENGELUARAN PER KATEGORI\n\n"
+            pesan_kosong += f"📅 {awal_periode.strftime('%d/%m/%Y')} - {akhir_periode.strftime('%d/%m/%Y')}\n\n⚪ Belum ada pengeluaran."
+            await update.message.reply_text(pesan_kosong)
             return
 
-        # ==========================================
-        # SORTING
-        # ==========================================
-
-        kategori_sorted = sorted(
-            kategori_data.values(),
-            key=lambda x: x["nominal"],
-            reverse=True
-        )
-
-        total_pengeluaran = sum(
-            item["nominal"]
-            for item in kategori_sorted
-        )
-
-        # ==========================================
-        # FORMAT RUPIAH
-        # ==========================================
+        kategori_sorted = sorted(kategori_data.values(), key=lambda x: x["nominal"], reverse=True)
+        total_pengeluaran = sum(item["nominal"] for item in kategori_sorted)
 
         def rupiah(angka):
+            return f"Rp{int(angka):,}".replace(",", ".")
 
-            return (
-                f"Rp{int(angka):,}"
-                .replace(",", ".")
-            )
-
-        # ==========================================
-        # HEADER
-        # ==========================================
-
-        if kategori_filter:
-
-            pesan = (
-                f"📊 DETAIL KATEGORI\n"
-                f"━━━━━━━━━━━━━━━━\n\n"
-                f"🏷️ {kategori_sorted[0]['nama']}\n"
-                f"📅 {nama_bulan} {tahun}\n\n"
-            )
-
-        else:
-
-            pesan = (
-                f"📊 PENGELUARAN PER KATEGORI\n"
-                f"━━━━━━━━━━━━━━━━\n\n"
-                f"📅 {nama_bulan} {tahun}\n\n"
-            )
-
-        # ==========================================
-        # DETAIL KATEGORI
-        # ==========================================
+        pesan = f"📊 DETAIL KATEGORI\n━━━━━━━━━━━━━━━━\n\n" if kategori_filter else f"📊 PENGELUARAN PER KATEGORI\n━━━━━━━━━━━━━━━━\n\n"
+        pesan += f"📅 {awal_periode.strftime('%d/%m/%Y')} - {akhir_periode.strftime('%d/%m/%Y')}\n\n"
 
         for item in kategori_sorted:
-
             nama = item["nama"]
             nominal = item["nominal"]
             jumlah = item["jumlah"]
+            persen = (nominal / total_pengeluaran * 100) if total_pengeluaran > 0 else 0
 
-            if total_pengeluaran > 0:
-
-                persen = (
-                    nominal
-                    / total_pengeluaran
-                ) * 100
-
-            else:
-
-                persen = 0
-
-            # Progress bar sederhana
-            jumlah_bar = int(persen / 5)
-
-            if jumlah_bar < 1 and persen > 0:
-                jumlah_bar = 1
-
+            jumlah_bar = max(1, int(persen / 5)) if persen > 0 else 0
             bar = "█" * jumlah_bar
 
             pesan += (
@@ -2627,239 +1226,82 @@ async def kategori(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"📋 {jumlah} transaksi\n\n"
             )
 
-        # ==========================================
-        # TOTAL
-        # ==========================================
-
-        pesan += (
-            f"━━━━━━━━━━━━━━━━\n"
-            f"💰 TOTAL PENGELUARAN\n"
-            f"{rupiah(total_pengeluaran)}\n\n"
-        )
-
-        # ==========================================
-        # KATEGORI TERBESAR
-        # ==========================================
-
+        pesan += f"━━━━━━━━━━━━━━━━\n💰 TOTAL PENGELUARAN\n{rupiah(total_pengeluaran)}\n\n"
         if not kategori_filter:
-
             terbesar = kategori_sorted[0]
+            pesan += f"🏆 TERBESAR\n{terbesar['nama']} — {rupiah(terbesar['nominal'])}\n\n"
 
-            pesan += (
-                f"🏆 TERBESAR\n"
-                f"{terbesar['nama']} — "
-                f"{rupiah(terbesar['nominal'])}\n\n"
-            )
-
-        # ==========================================
-        # JUMLAH KATEGORI
-        # ==========================================
-
-        pesan += (
-            f"📌 JUMLAH KATEGORI\n"
-            f"{len(kategori_sorted)} kategori"
-        )
-
-        # ==========================================
-        # RESPONSE
-        # ==========================================
-
+        pesan += f"📌 JUMLAH KATEGORI\n{len(kategori_sorted)} kategori"
         await update.message.reply_text(pesan)
 
     except Exception as e:
-
         print("ERROR KATEGORI:", e)
+        await update.message.reply_text("❌ Gagal mengambil data kategori.")
 
-        await update.message.reply_text(
-            "❌ Gagal mengambil data kategori.\n\n"
-            "Cek PowerShell untuk melihat error."
-        )
 
 # ==========================================
 # TAMBAH TARGET KEUANGAN
 # ==========================================
 
 async def target(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
     try:
-
-        # ==========================================
-        # CEK FORMAT
-        # ==========================================
-
         if len(context.args) < 2:
-
             await update.message.reply_text(
                 "❌ Format salah.\n\n"
-                "Gunakan:\n"
-                "/target [Nama Target] [Nominal Target] [Setoran Bulanan]\n\n"
-                "Contoh:\n"
-                "/target Laptop 6000000 500000\n"
-                "/target Liburan 3000000 300000"
+                "Gunakan:\n/target [Nama Target] [Nominal Target] [Setoran Bulanan]\n\n"
+                "Contoh:\n/target Laptop 6000000 500000"
             )
-
             return
-
-        # ==========================================
-        # NAMA TARGET
-        # ==========================================
 
         nama_target = context.args[0].strip()
 
-        # ==========================================
-        # NOMINAL TARGET
-        # ==========================================
-
         try:
-
             target_nominal = int(context.args[1])
-
         except ValueError:
-
-            await update.message.reply_text(
-                "❌ Nominal target harus berupa angka.\n\n"
-                "Contoh:\n"
-                "/target Laptop 6000000 500000"
-            )
-
+            await update.message.reply_text("❌ Nominal target harus angka.")
             return
 
-        # ==========================================
-        # SETORAN BULANAN
-        # ==========================================
+        setoran_bulanan = int(context.args[2]) if len(context.args) >= 3 else 0
 
-        if len(context.args) >= 3:
-
-            try:
-
-                setoran_bulanan = int(context.args[2])
-
-            except ValueError:
-
-                await update.message.reply_text(
-                    "❌ Setoran bulanan harus berupa angka.\n\n"
-                    "Contoh:\n"
-                    "/target Laptop 6000000 500000"
-                )
-
-                return
-
-        else:
-
-            setoran_bulanan = 0
-
-        # ==========================================
-        # VALIDASI NOMINAL
-        # ==========================================
-
-        if target_nominal <= 0:
-
-            await update.message.reply_text(
-                "❌ Nominal target harus lebih dari 0."
-            )
-
+        if target_nominal <= 0 or setoran_bulanan < 0:
+            await update.message.reply_text("❌ Nominal tidak valid.")
             return
 
-        if setoran_bulanan < 0:
-
-            await update.message.reply_text(
-                "❌ Setoran bulanan tidak boleh negatif."
-            )
-
-            return
-
-        # ==========================================
-        # CEK TARGET DUPLIKAT
-        # ==========================================
-
-        existing = (
-            supabase
-            .table("target_keuangan")
-            .select("id, nama_target")
-            .ilike("nama_target", nama_target)
-            .execute()
-        )
-
+        existing = supabase.table("target_keuangan").select("id, nama_target").ilike("nama_target", nama_target).execute()
         if existing.data:
-
-            await update.message.reply_text(
-                f"⚠️ Target '{nama_target}' sudah ada.\n\n"
-                "Gunakan nama target yang berbeda."
-            )
-
+            await update.message.reply_text(f"⚠️ Target '{nama_target}' sudah ada.")
             return
 
-        # ==========================================
-        # SIMPAN TARGET
-        # ==========================================
-
-        response = (
-            supabase
-            .table("target_keuangan")
-            .insert({
-                "nama_target": nama_target,
-                "target_nominal": target_nominal,
-                "terkumpul": 0,
-                "setoran_bulanan": setoran_bulanan
-            })
-            .execute()
-        )
+        response = supabase.table("target_keuangan").insert({
+            "nama_target": nama_target,
+            "target_nominal": target_nominal,
+            "terkumpul": 0,
+            "setoran_bulanan": setoran_bulanan
+        }).execute()
 
         if not response.data:
-
-            await update.message.reply_text(
-                "❌ Target gagal disimpan."
-            )
-
+            await update.message.reply_text("❌ Target gagal disimpan.")
             return
 
-        data = response.data[0]
-
-        target_id = data.get("id")
-
-        # ==========================================
-        # FORMAT RUPIAH
-        # ==========================================
+        target_id = response.data[0].get("id")
 
         def rupiah(angka):
-
-            return (
-                f"Rp{int(angka):,}"
-                .replace(",", ".")
-            )
-
-        # ==========================================
-        # RESPONSE
-        # ==========================================
+            return f"Rp{int(angka):,}".replace(",", ".")
 
         await update.message.reply_text(
-
-            f"🎯 TARGET BERHASIL DIBUAT\n"
-            f"━━━━━━━━━━━━━━━━\n\n"
-
+            f"🎯 TARGET BERHASIL DIBUAT\n━━━━━━━━━━━━━━━━\n\n"
             f"🆔 ID: {target_id}\n"
             f"🏷️ Target: {nama_target}\n"
-            f"💰 Target Nominal: "
-            f"{rupiah(target_nominal)}\n"
-            f"💵 Terkumpul: "
-            f"{rupiah(0)}\n"
-            f"📥 Setoran/Bulan: "
-            f"{rupiah(setoran_bulanan)}\n\n"
-
+            f"💰 Target Nominal: {rupiah(target_nominal)}\n"
+            f"💵 Terkumpul: {rupiah(0)}\n"
+            f"📥 Setoran/Bulan: {rupiah(setoran_bulanan)}\n\n"
             f"📊 Progress: 0%\n\n"
-
-            f"💡 Gunakan /setor nanti "
-            f"untuk menambahkan uang ke target."
+            f"💡 Gunakan /setor nanti untuk menambahkan uang ke target."
         )
 
     except Exception as e:
-
         print("ERROR TARGET:", e)
-
-        await update.message.reply_text(
-            "❌ Gagal membuat target.\n\n"
-            "Cek PowerShell untuk melihat error."
-        )
+        await update.message.reply_text("❌ Gagal membuat target.")
 
 
 # ==========================================
@@ -2867,264 +1309,83 @@ async def target(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ==========================================
 
 async def setor(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
     try:
-
-        # ==========================================
-        # CEK FORMAT
-        # ==========================================
-
         if len(context.args) != 2:
-
-            await update.message.reply_text(
-                "❌ Format salah.\n\n"
-                "Gunakan:\n"
-                "/setor [ID Target] [Nominal]\n\n"
-                "Contoh:\n"
-                "/setor 1 500000"
-            )
-
+            await update.message.reply_text("❌ Format salah.\n\nGunakan:\n/setor [ID Target] [Nominal]")
             return
 
-        # ==========================================
-        # ID TARGET
-        # ==========================================
-
         try:
-
             target_id = int(context.args[0])
-
-        except ValueError:
-
-            await update.message.reply_text(
-                "❌ ID target harus berupa angka.\n\n"
-                "Contoh:\n"
-                "/setor 1 500000"
-            )
-
-            return
-
-        # ==========================================
-        # NOMINAL SETORAN
-        # ==========================================
-
-        try:
-
             nominal_setoran = int(context.args[1])
-
         except ValueError:
-
-            await update.message.reply_text(
-                "❌ Nominal setoran harus berupa angka.\n\n"
-                "Contoh:\n"
-                "/setor 1 500000"
-            )
-
+            await update.message.reply_text("❌ ID dan Nominal harus angka.")
             return
-
-        # ==========================================
-        # VALIDASI NOMINAL
-        # ==========================================
 
         if nominal_setoran <= 0:
-
-            await update.message.reply_text(
-                "❌ Nominal setoran harus lebih dari 0."
-            )
-
+            await update.message.reply_text("❌ Setoran harus > 0.")
             return
 
-        # ==========================================
-        # CARI TARGET
-        # ==========================================
-
-        response = (
-            supabase
-            .table("target_keuangan")
-            .select(
-                "id, nama_target, target_nominal, "
-                "terkumpul, setoran_bulanan"
-            )
-            .eq("id", target_id)
-            .execute()
-        )
-
+        response = supabase.table("target_keuangan").select("*").eq("id", target_id).execute()
         if not response.data:
-
-            await update.message.reply_text(
-                f"❌ Target dengan ID {target_id} "
-                "tidak ditemukan."
-            )
-
+            await update.message.reply_text(f"❌ Target ID {target_id} tidak ditemukan.")
             return
 
         target_data = response.data[0]
+        nama_target = target_data.get("nama_target", "-")
+        target_nominal = int(target_data.get("target_nominal", 0))
+        terkumpul_lama = int(target_data.get("terkumpul", 0))
 
-        nama_target = target_data.get(
-            "nama_target",
-            "-"
-        )
+        terkumpul_baru = terkumpul_lama + nominal_setoran
+        progress = min(100, (terkumpul_baru / target_nominal) * 100)
+        kekurangan = max(0, target_nominal - terkumpul_baru)
 
-        target_nominal = int(
-            target_data.get(
-                "target_nominal",
-                0
-            )
-        )
-
-        terkumpul_lama = int(
-            target_data.get(
-                "terkumpul",
-                0
-            )
-        )
-
-        setoran_bulanan = int(
-            target_data.get(
-                "setoran_bulanan",
-                0
-            )
-        )
-
-        # ==========================================
-        # HITUNG TERKUMPUL BARU
-        # ==========================================
-
-        terkumpul_baru = (
-            terkumpul_lama
-            + nominal_setoran
-        )
-
-        # Jangan biarkan progress lebih dari 100%
-        progress = (
-            terkumpul_baru
-            / target_nominal
-        ) * 100
-
-        if progress > 100:
-            progress = 100
-
-        kekurangan = (
-            target_nominal
-            - terkumpul_baru
-        )
-
-        if kekurangan < 0:
-            kekurangan = 0
-
-        # ==========================================
-        # UPDATE DATABASE
-        # ==========================================
-
-        update_response = (
-            supabase
-            .table("target_keuangan")
-            .update({
-                "terkumpul": terkumpul_baru
-            })
-            .eq("id", target_id)
-            .execute()
-        )
-
-        if not update_response.data:
-
-            await update.message.reply_text(
-                "❌ Gagal memperbarui target."
-            )
-
-            return
-
-        # ==========================================
-        # FORMAT RUPIAH
-        # ==========================================
+        supabase.table("target_keuangan").update({"terkumpul": terkumpul_baru}).eq("id", target_id).execute()
 
         def rupiah(angka):
+            return f"Rp{int(angka):,}".replace(",", ".")
 
-            return (
-                f"Rp{int(angka):,}"
-                .replace(",", ".")
-            )
-
-        # ==========================================
-        # STATUS TARGET
-        # ==========================================
-
-        if terkumpul_baru >= target_nominal:
-
-            status = (
-                "🎉 TARGET TERCAPAI!\n\n"
-                "Selamat bro! Target keuangan "
-                "ini sudah tercapai. 🔥"
-            )
-
-        elif progress >= 75:
-
-            status = "🔥 Hampir tercapai!"
-
-        elif progress >= 50:
-
-            status = "💪 Lebih dari setengah jalan!"
-
-        elif progress >= 25:
-
-            status = "🚀 Progress bagus!"
-
-        else:
-
-            status = "🌱 Baru mulai, tetap konsisten!"
-
-        # ==========================================
-        # PROGRESS BAR
-        # ==========================================
-
-        jumlah_bar = int(progress / 10)
-
-        if jumlah_bar > 10:
-            jumlah_bar = 10
-
-        bar = (
-            "█" * jumlah_bar
-            + "░" * (10 - jumlah_bar)
-        )
-
-        # ==========================================
-        # RESPONSE
-        # ==========================================
+        status = "🎉 TARGET TERCAPAI! 🔥" if terkumpul_baru >= target_nominal else ("🔥 Hampir tercapai!" if progress >= 75 else "💪 Progress bagus!")
+        bar = "█" * min(10, int(progress / 10)) + "░" * (10 - min(10, int(progress / 10)))
 
         await update.message.reply_text(
-
-            f"💰 SETORAN BERHASIL\n"
-            f"━━━━━━━━━━━━━━━━\n\n"
-
+            f"💰 SETORAN BERHASIL\n━━━━━━━━━━━━━━━━\n\n"
             f"🆔 ID Target: {target_id}\n"
             f"🏷️ Target: {nama_target}\n\n"
-
-            f"💵 Setoran: "
-            f"{rupiah(nominal_setoran)}\n"
-            f"💰 Terkumpul: "
-            f"{rupiah(terkumpul_baru)}\n"
-            f"🎯 Target: "
-            f"{rupiah(target_nominal)}\n"
-            f"📉 Kekurangan: "
-            f"{rupiah(kekurangan)}\n\n"
-
-            f"📊 Progress\n"
-            f"{bar} {progress:.0f}%\n\n"
-
-            f"{status}"
+            f"💵 Setoran: {rupiah(nominal_setoran)}\n"
+            f"💰 Terkumpul: {rupiah(terkumpul_baru)}\n"
+            f"🎯 Target: {rupiah(target_nominal)}\n"
+            f"📉 Kekurangan: {rupiah(kekurangan)}\n\n"
+            f"📊 Progress\n{bar} {progress:.0f}%\n\n{status}"
         )
 
     except Exception as e:
-
         print("ERROR SETOR:", e)
+        await update.message.reply_text("❌ Gagal melakukan setoran.")
+import os
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
-        await update.message.reply_text(
-            "❌ Gagal melakukan setoran.\n\n"
-            "Cek PowerShell untuk melihat error."
-        )
+# Health check server untuk Render Free Tier
+class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot Financial Farhan Aktif!")
+
+def run_dummy_server():
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), SimpleHTTPRequestHandler)
+    server.serve_forever()
+
+# Jalankan HTTP server di background thread
+threading.Thread(target=run_dummy_server, daemon=True).start()
+
+
+# ==========================================
+# MAIN
+# ==========================================
 
 def main():
-
     app = Application.builder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
@@ -3145,14 +1406,9 @@ def main():
     app.add_handler(CommandHandler("bensin", bensin))
     app.add_handler(CommandHandler("hapus", hapus))
 
-    app.add_handler(
-        MessageHandler(
-            filters.TEXT & ~filters.COMMAND,
-            konfirmasi_semua
-        )
-    )
-    print("Finance Bot berjalan...")
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, konfirmasi_semua))
 
+    print("Finance Bot berjalan (Siklus Tgl 11)...")
     app.run_polling()
 
 
