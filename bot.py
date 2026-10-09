@@ -2,17 +2,19 @@ import os
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
-# Dummy HTTP Server agar Web Service Render tetap Live
+# Server Dummy agar Render tahu bot aktif & tidak dimatikan
 class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"Bot Farhan Aktif!")
+        self.wfile.write(b"Bot Financial Farhan Aktif!")
 
 def run_dummy_server():
     port = int(os.environ.get("PORT", 8080))
     server = HTTPServer(("0.0.0.0", port), SimpleHTTPRequestHandler)
     server.serve_forever()
+
+threading.Thread(target=run_dummy_server, daemon=True).start()
 
 # Jalankan server HTTP di latar belakang (background thread)
 threading.Thread(target=run_dummy_server, daemon=True).start()
