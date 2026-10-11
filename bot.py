@@ -2,7 +2,7 @@ import os
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
-# Server Dummy agar Render tahu bot aktif & tidak dimatikan
+# Dummy HTTP Server agar Render tahu bot aktif & tidak dimatikan
 class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -15,7 +15,6 @@ def run_dummy_server():
     server.serve_forever()
 
 threading.Thread(target=run_dummy_server, daemon=True).start()
-
 # Jalankan server HTTP di latar belakang (background thread)
 threading.Thread(target=run_dummy_server, daemon=True).start()
 from datetime import datetime, timezone, timedelta
